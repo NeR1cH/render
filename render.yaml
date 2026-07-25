@@ -6,7 +6,7 @@ services:
     plan: free
     region: frankfurt
     image:
-      url: docker.n8n.io/n8nio/n8n:latest
+      url: docker.io/n8nio/n8n:latest
     envVars:
       - key: NODE_ENV
         value: production
