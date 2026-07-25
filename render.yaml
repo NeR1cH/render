@@ -5,20 +5,10 @@ services:
     env: docker
     plan: free
     region: frankfurt
-    image:
-      url: docker.n8n.io/n8nio/n8n:latest
+    dockerImage: docker.n8n.io/n8nio/n8n:latest
     envVars:
-      - key: N8N_PORT
-        value: 10000
-      - key: N8N_PROTOCOL
-        value: https
       - key: NODE_ENV
         value: production
-      - key: WEBHOOK_URL
-        fromService:
-          type: web
-          name: anime-assistant-n8n
-          property: host
       - key: N8N_ENCRYPTION_KEY
         generateValue: true
       - key: DB_TYPE
