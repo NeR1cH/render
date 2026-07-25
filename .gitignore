@@ -1,0 +1,13 @@
+# Environment secrets
+.env
+
+# Docker volumes and local runtime data
+postgres_data/
+n8n_data/
+caddy_data/
+caddy_config/
+
+# Python virtual environment (if any)
+.venv/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,52 @@
+services:
+  # 1. Сервис n8n
+  - type: web
+    name: anime-assistant-n8n
+    env: docker
+    plan: free
+    region: frankfurt
+    image:
+      url: docker.n8n.io/n8nio/n8n:latest
+    envVars:
+      - key: N8N_PORT
+        value: 10000
+      - key: N8N_PROTOCOL
+        value: https
+      - key: NODE_ENV
+        value: production
+      - key: WEBHOOK_URL
+        fromService:
+          type: web
+          name: anime-assistant-n8n
+          property: host
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
+      - key: DB_TYPE
+        value: postgresdb
+      - key: DB_POSTGRESDB_HOST
+        fromDatabase:
+          name: anime-db
+          property: host
+      - key: DB_POSTGRESDB_PORT
+        fromDatabase:
+          name: anime-db
+          property: port
+      - key: DB_POSTGRESDB_DATABASE
+        fromDatabase:
+          name: anime-db
+          property: database
+      - key: DB_POSTGRESDB_USER
+        fromDatabase:
+          name: anime-db
+          property: user
+      - key: DB_POSTGRESDB_PASSWORD
+        fromDatabase:
+          name: anime-db
+          property: password
+
+databases:
+  - name: anime-db
+    plan: free
+    region: frankfurt
+    databaseName: anime_db
+    user: anime_user
