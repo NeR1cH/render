@@ -2,18 +2,22 @@ services:
   # 1. Сервис n8n
   - type: web
     name: anime-assistant-n8n
-    env: docker
+    runtime: image
     plan: free
     region: frankfurt
     image:
-      url: docker.n8n.io/n8nio/n8n:latest
+      url: docker.io/n8nio/n8n:latest
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: N8N_PORT
         value: 10000
       - key: N8N_PROTOCOL
         value: https
-      - key: NODE_ENV
-        value: production
+      # 💡 КРИТИЧНО: Заставляет Node.js помещаться в 512МБ ОЗУ на Render
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=320"
+      # 💡 КРИТИЧНО: Формирует правильный адрес вебхука для Telegram
       - key: WEBHOOK_URL
         fromService:
           type: web
