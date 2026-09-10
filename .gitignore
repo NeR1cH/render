@@ -11,3 +11,10 @@ caddy_config/
 .venv/
 __pycache__/
 *.py[cod]
+
+# Local migration state and credentials
+.shikimori_token.json
+.shikimori_credentials.json
+.shiki_match_cache.json
+.migration_progress.json
+errors.txt
