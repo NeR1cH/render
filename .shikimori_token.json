@@ -1,9 +1,0 @@
-{
-  "access_token": "KWA3RsJyHQK8wXsD5ODNcJr9GWUSOvCBHrJLzcUYamo",
-  "token_type": "Bearer",
-  "expires_in": 86400,
-  "refresh_token": "KKQx6Nls2psablzakD1Nio9aPiGEAu2vrdcNHs7rjms",
-  "scope": "user_rates",
-  "created_at": 1783935777,
-  "obtained_at": 1783935777
-}

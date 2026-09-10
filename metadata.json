@@ -1,0 +1,8 @@
+{
+  "name": "AnimeLib to Shikimori Migration",
+  "description": "Interactive anime bookmarks migrator from AnimeLib to Shikimori with fuzzy title matching, conflict resolution, and status tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
