@@ -1,510 +1,214 @@
 import axios, { AxiosInstance } from 'axios';
-import dotenv from 'dotenv';
-import { dbService } from '../db/database';
+import { dbService } from '../db/database.js';
 
-dotenv.config();
+export interface ShikimoriPoster {
+  id: string;
+  originalUrl: string;
+  mainUrl: string;
+}
 
-// User-Agent is strictly required by Shikimori to avoid Cloudflare/DDoS-GUARD blocks
-const SHIKIMORI_USER_AGENT =
-  process.env.SHIKIMORI_USER_AGENT || 'ANIME ASSISTANT v2.0 (contact: boykonik2@gmail.com)';
-const SHIKIMORI_GRAPHQL_URL = 'https://shikimori.one/api/graphql';
-const SHIKIMORI_API_V2_URL = 'https://shikimori.one/api/v2';
-const SHIKIMORI_API_V1_URL = 'https://shikimori.one/api';
-const SHIKIMORI_OAUTH_TOKEN_URL = 'https://shikimori.one/oauth/token';
+export interface ShikimoriGenre {
+  id: string;
+  name: string;
+  russian: string;
+  kind?: string;
+}
 
 export interface ShikimoriAnime {
   id: string | number;
-  malId?: string | number;
   name: string;
   russian?: string;
-  licenseNameRu?: string;
-  english?: string;
-  kind?: string;
   score?: number;
   status?: string;
   episodes?: number;
   episodesAired?: number;
+  genres?: ShikimoriGenre[];
+  poster?: ShikimoriPoster;
   description?: string;
-  poster?: {
-    id?: string;
-    originalUrl?: string;
-    mainUrl?: string;
-  };
-  genres?: Array<{ id: string; name: string; russian: string }>;
   nextEpisodeAt?: string;
-  url?: string;
 }
 
 export interface UserRateInput {
   target_id: number;
-  target_type?: 'Anime';
-  status: 'watching' | 'completed' | 'planned' | 'dropped' | 'on_hold' | 'rewatching';
-  episodes?: number;
+  status?: 'watching' | 'completed' | 'planned' | 'dropped' | 'on_hold' | 'rewatching';
   score?: number;
-  re_watches?: number;
-  text?: string;
+  episodes?: number;
 }
 
 export class ShikimoriService {
   private client: AxiosInstance;
-  private clientId: string;
-  private clientSecret: string;
+  private readonly baseUrl = 'https://shikimori.one';
+  private readonly graphqlUrl = 'https://shikimori.one/api/graphql';
 
   constructor() {
-    this.clientId = process.env.SHIKIMORI_CLIENT_ID || '';
-    this.clientSecret = process.env.SHIKIMORI_CLIENT_SECRET || '';
-
     this.client = axios.create({
+      baseURL: this.baseUrl,
+      timeout: 15000,
       headers: {
-        'User-Agent': SHIKIMORI_USER_AGENT,
+        'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'ANIME ASSISTANT v2.0 (contact: githubsup972@gmail.com)',
         'Content-Type': 'application/json',
       },
-      timeout: 15000,
     });
   }
 
-  /**
-   * Helper to get active OAuth access token, refreshing it if expired
-   */
-  public async getValidAccessToken(): Promise<string | null> {
-    const tokenRecord = dbService.getAuthTokens('shikimori');
-    if (!tokenRecord || !tokenRecord.access_token) {
-      return process.env.SHIKIMORI_ACCESS_TOKEN || null;
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-    // Check if token expires in less than 5 minutes (300 seconds)
-    if (tokenRecord.expires_at && tokenRecord.expires_at - now < 300 && tokenRecord.refresh_token) {
-      try {
-        const refreshed = await this.refreshToken(tokenRecord.refresh_token);
-        return refreshed;
-      } catch (err) {
-        console.error('Failed to refresh Shikimori OAuth token:', err);
-        return tokenRecord.access_token;
-      }
-    }
-
-    return tokenRecord.access_token;
-  }
-
-  /**
-   * Refresh OAuth token using refresh_token grant
-   */
-  public async refreshToken(refreshToken: string): Promise<string> {
-    const res = await axios.post(
-      SHIKIMORI_OAUTH_TOKEN_URL,
-      {
-        grant_type: 'refresh_token',
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        refresh_token: refreshToken,
-      },
-      {
-        headers: {
-          'User-Agent': SHIKIMORI_USER_AGENT,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    const { access_token, refresh_token: new_refresh_token, expires_in } = res.data;
-    const expires_at = Math.floor(Date.now() / 1000) + (expires_in || 86400);
-
-    dbService.saveAuthTokens({
-      service: 'shikimori',
-      access_token,
-      refresh_token: new_refresh_token || refreshToken,
-      expires_at,
-    });
-
-    return access_token;
-  }
-
-  /**
-   * Universal GraphQL Query Executor for Shikimori
-   */
-  public async queryGraphQL<T = any>(query: string, variables?: Record<string, any>): Promise<T> {
-    const token = await this.getValidAccessToken();
-    const headers: Record<string, string> = {
-      'User-Agent': SHIKIMORI_USER_AGENT,
+  private async getHeaders() {
+    const token = process.env.SHIKIMORI_ACCESS_TOKEN;
+    return {
+      'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'ANIME ASSISTANT v2.0',
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    const response = await this.client.post(
-      SHIKIMORI_GRAPHQL_URL,
-      {
-        query,
-        variables,
-      },
-      { headers }
-    );
-
-    if (response.data.errors && response.data.errors.length > 0) {
-      throw new Error(`Shikimori GraphQL Error: ${JSON.stringify(response.data.errors)}`);
-    }
-
-    return response.data.data;
   }
 
-  // ==========================================
-  // 1. Search Anime (GraphQL)
-  // ==========================================
-  public async searchAnime(searchTitle: string, limit: number = 10): Promise<ShikimoriAnime[]> {
+  async searchAnime(searchTitle: string, limit: number = 5): Promise<ShikimoriAnime[]> {
     const query = `
-      query SearchAnime($search: String!, $limit: Int!) {
-        animes(search: $search, limit: $limit, order: ranked) {
+      query SearchAnime($search: String, $limit: PositiveInt) {
+        animes(search: $search, limit: $limit) {
           id
-          malId
           name
           russian
-          licenseNameRu
-          english
-          kind
           score
           status
           episodes
           episodesAired
-          description
-          poster {
-            id
-            originalUrl
-            mainUrl
-          }
           genres {
             id
             name
             russian
           }
-          nextEpisodeAt
-          url
-        }
-      }
-    `;
-
-    const data = await this.queryGraphQL<{ animes: ShikimoriAnime[] }>(query, {
-      search: searchTitle,
-      limit,
-    });
-
-    return data?.animes || [];
-  }
-
-  // ==========================================
-  // 2. Top Anime (GraphQL)
-  // ==========================================
-  public async getTopAnime(limit: number = 15, page: number = 1): Promise<ShikimoriAnime[]> {
-    const query = `
-      query GetTopAnime($limit: Int!, $page: Int!) {
-        animes(page: $page, limit: $limit, order: ranked) {
-          id
-          name
-          russian
-          kind
-          score
-          status
-          episodes
-          episodesAired
           poster {
+            id
+            originalUrl
             mainUrl
           }
-          genres {
-            russian
-          }
-          url
         }
       }
     `;
-
-    const data = await this.queryGraphQL<{ animes: ShikimoriAnime[] }>(query, {
-      limit,
-      page,
-    });
-
-    return data?.animes || [];
-  }
-
-  // ==========================================
-  // 3. Ongoing Anime (GraphQL)
-  // ==========================================
-  public async getOngoingAnime(limit: number = 15, page: number = 1): Promise<ShikimoriAnime[]> {
-    const query = `
-      query GetOngoingAnime($limit: Int!, $page: Int!) {
-        animes(page: $page, limit: $limit, status: "ongoing", order: popularity) {
-          id
-          name
-          russian
-          kind
-          score
-          status
-          episodes
-          episodesAired
-          nextEpisodeAt
-          poster {
-            mainUrl
-          }
-          genres {
-            russian
-          }
-          url
-        }
-      }
-    `;
-
-    const data = await this.queryGraphQL<{ animes: ShikimoriAnime[] }>(query, {
-      limit,
-      page,
-    });
-
-    return data?.animes || [];
-  }
-
-  // ==========================================
-  // 4. Update / Create user_rate (API v2)
-  // ==========================================
-  /**
-   * Updates or creates a user_rate record on Shikimori (watching, completed, planned, dropped).
-   * Uses Shikimori API v2 /api/v2/user_rates with OAuth Bearer token.
-   */
-  public async updateUserRate(rate: UserRateInput): Promise<any> {
-    const token = await this.getValidAccessToken();
-    if (!token) {
-      throw new Error(
-        'Missing Shikimori OAuth access token. Please authorize via OAuth to update user_rates.'
-      );
-    }
-
-    const tokenRecord = dbService.getAuthTokens('shikimori');
-    const userId = tokenRecord?.user_id || process.env.SHIKIMORI_USER_ID;
-
-    if (!userId) {
-      throw new Error('Shikimori user_id is required to synchronize user_rates.');
-    }
-
-    const payload = {
-      user_rate: {
-        user_id: parseInt(userId, 10),
-        target_id: rate.target_id,
-        target_type: rate.target_type || 'Anime',
-        status: rate.status,
-        episodes: rate.episodes,
-        score: rate.score,
-        rewatches: rate.re_watches,
-        text: rate.text,
-      },
-    };
 
     try {
-      // First try to check existing user_rate for this anime
-      const existingRes = await this.client.get(
-        `${SHIKIMORI_API_V2_URL}/user_rates`,
-        {
-          params: {
-            user_id: userId,
-            target_id: rate.target_id,
-            target_type: 'Anime',
-          },
-          headers: {
-            'User-Agent': SHIKIMORI_USER_AGENT,
-            Authorization: `Bearer ${token}`,
-          },
-        }
+      const response = await this.client.post(
+        this.graphqlUrl,
+        { query, variables: { search: searchTitle, limit } },
+        { headers: await this.getHeaders() }
       );
-
-      const existingRates = existingRes.data;
-      if (Array.isArray(existingRates) && existingRates.length > 0) {
-        const rateId = existingRates[0].id;
-        // PATCH existing user_rate
-        const patchRes = await this.client.patch(
-          `${SHIKIMORI_API_V2_URL}/user_rates/${rateId}`,
-          payload,
-          {
-            headers: {
-              'User-Agent': SHIKIMORI_USER_AGENT,
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        return patchRes.data;
-      } else {
-        // POST new user_rate
-        const postRes = await this.client.post(
-          `${SHIKIMORI_API_V2_URL}/user_rates`,
-          payload,
-          {
-            headers: {
-              'User-Agent': SHIKIMORI_USER_AGENT,
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        return postRes.data;
-      }
+      return response.data?.data?.animes || [];
     } catch (err: any) {
-      const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      throw new Error(`Failed to update user_rate on Shikimori: ${errMsg}`);
-    }
-  }
-
-  // ==========================================
-  // 5. Direct Details by ID (GraphQL)
-  // ==========================================
-  public async getAnimeById(id: number | string): Promise<ShikimoriAnime | null> {
-    const query = `
-      query GetAnimeById($ids: String!) {
-        animes(ids: $ids, limit: 1) {
-          id
-          malId
-          name
-          russian
-          english
-          kind
-          score
-          status
-          episodes
-          episodesAired
-          description
-          poster {
-            originalUrl
-            mainUrl
-          }
-          genres {
-            name
-            russian
-          }
-          nextEpisodeAt
-          url
-        }
-      }
-    `;
-
-    const data = await this.queryGraphQL<{ animes: ShikimoriAnime[] }>(query, {
-      ids: String(id),
-    });
-
-    return data?.animes?.[0] || null;
-  }
-
-  // ==========================================
-  // 6. User Profile & Stats (REST v1 / v2)
-  // ==========================================
-  public async getUserProfile(): Promise<{
-    id: number;
-    nickname: string;
-    avatar?: string;
-    stats?: {
-      statuses?: Array<{ id: number; grouped_id: string; name: string; size: number; type: string }>;
-      full_statuses?: Array<{ id: number; grouped_id: string; name: string; size: number; type: string }>;
-    };
-  } | null> {
-    const token = await this.getValidAccessToken();
-    const tokenRecord = dbService.getAuthTokens('shikimori');
-    const userId = tokenRecord?.user_id || process.env.SHIKIMORI_USER_ID;
-
-    if (!userId) return null;
-
-    try {
-      const res = await this.client.get(`${SHIKIMORI_API_V1_URL}/users/${userId}`, {
-        headers: {
-          'User-Agent': SHIKIMORI_USER_AGENT,
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-
-      return {
-        id: res.data.id,
-        nickname: res.data.nickname,
-        avatar: res.data.avatar || res.data.image?.x160,
-        stats: res.data.stats,
-      };
-    } catch (err) {
-      console.warn('Could not fetch user profile from Shikimori:', err);
-      return null;
-    }
-  }
-
-  // ==========================================
-  // 7. Calendar of Anime Episodes (REST v1)
-  // ==========================================
-  public async getCalendar(): Promise<
-    Array<{
-      next_episode: number;
-      next_episode_at: string;
-      duration?: number;
-      anime: {
-        id: number;
-        name: string;
-        russian: string;
-        score: string;
-        episodes: number;
-        episodes_aired: number;
-        image?: {
-          original?: string;
-          preview?: string;
-        };
-      };
-    }>
-  > {
-    try {
-      const res = await this.client.get(`${SHIKIMORI_API_V1_URL}/calendar`, {
-        headers: {
-          'User-Agent': SHIKIMORI_USER_AGENT,
-        },
-      });
-      return res.data || [];
-    } catch (err) {
-      console.error('Failed to fetch calendar from Shikimori:', err);
+      console.error(`[Shikimori GraphQL Search Error for "${searchTitle}"]`, err.message);
       return [];
     }
   }
 
-  // ==========================================
-  // 8. Random Planned Anime for Discovery
-  // ==========================================
-  public async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
-    const token = await this.getValidAccessToken();
-    const tokenRecord = dbService.getAuthTokens('shikimori');
-    const userId = tokenRecord?.user_id || process.env.SHIKIMORI_USER_ID;
-
-    if (userId && token) {
-      try {
-        const ratesRes = await this.client.get(`${SHIKIMORI_API_V2_URL}/user_rates`, {
-          params: {
-            user_id: userId,
-            target_type: 'Anime',
-            status: 'planned',
-            limit: 50,
-          },
-          headers: {
-            'User-Agent': SHIKIMORI_USER_AGENT,
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        const list = ratesRes.data;
-        if (Array.isArray(list) && list.length > 0) {
-          const randomItem = list[Math.floor(Math.random() * list.length)];
-          const anime = await this.getAnimeById(randomItem.target_id);
-          if (anime) return anime;
+  async getAnimeById(id: number | string): Promise<ShikimoriAnime | null> {
+    const query = `
+      query GetAnime($id: String!) {
+        animes(ids: $id) {
+          id
+          name
+          russian
+          score
+          status
+          episodes
+          episodesAired
+          description
+          genres {
+            id
+            name
+            russian
+          }
+          poster {
+            id
+            originalUrl
+            mainUrl
+          }
         }
-      } catch (err) {
-        console.warn('Failed to get planned anime from user rates:', err);
       }
-    }
+    `;
 
-    // Fallback: Random Top Ranked Anime
-    const randomPage = Math.floor(Math.random() * 5) + 1;
-    const top = await this.getTopAnime(15, randomPage);
-    if (top.length > 0) {
-      return top[Math.floor(Math.random() * top.length)];
+    try {
+      const response = await this.client.post(
+        this.graphqlUrl,
+        { query, variables: { id: String(id) } },
+        { headers: await this.getHeaders() }
+      );
+      const list = response.data?.data?.animes;
+      return list && list.length > 0 ? list[0] : null;
+    } catch (err: any) {
+      console.error(`[Shikimori GraphQL GetById Error for ${id}]`, err.message);
+      return null;
     }
+  }
 
-    return null;
+  async getCalendar(): Promise<any[]> {
+    try {
+      const res = await this.client.get('/api/calendar', { headers: await this.getHeaders() });
+      return res.data || [];
+    } catch (err: any) {
+      console.error('[Shikimori Calendar Error]', err.message);
+      return [];
+    }
+  }
+
+  async getUserProfile(): Promise<any | null> {
+    const userId = process.env.SHIKIMORI_USER_ID;
+    if (!userId) return null;
+
+    try {
+      const res = await this.client.get(`/api/users/${userId}`, { headers: await this.getHeaders() });
+      return res.data;
+    } catch (err: any) {
+      console.error('[Shikimori Profile Error]', err.message);
+      return null;
+    }
+  }
+
+  async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
+    try {
+      const searchResults = await this.searchAnime('', 10);
+      if (searchResults && searchResults.length > 0) {
+        const random = searchResults[Math.floor(Math.random() * searchResults.length)];
+        return await this.getAnimeById(random.id);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async updateUserRate(rate: UserRateInput): Promise<any> {
+    const userId = process.env.SHIKIMORI_USER_ID;
+    if (!userId) throw new Error('SHIKIMORI_USER_ID is missing in .env');
+
+    const headers = await this.getHeaders();
+
+    const checkRes = await this.client.get('/api/v2/user_rates', {
+      params: { user_id: userId, target_id: rate.target_id, target_type: 'Anime' },
+      headers,
+    });
+
+    const existingList = checkRes.data || [];
+
+    if (existingList.length > 0) {
+      const existingId = existingList[0].id;
+      const patchData: any = {};
+      if (rate.status) patchData.status = rate.status;
+      if (rate.episodes !== undefined) patchData.episodes = rate.episodes;
+      if (rate.score !== undefined) patchData.score = rate.score;
+
+      const res = await this.client.patch(`/api/v2/user_rates/${existingId}`, { user_rate: patchData }, { headers });
+      return res.data;
+    } else {
+      const postData = {
+        user_id: Number(userId),
+        target_id: rate.target_id,
+        target_type: 'Anime',
+        status: rate.status || 'watching',
+        episodes: rate.episodes || 0,
+        score: rate.score || 0,
+      };
+
+      const res = await this.client.post('/api/v2/user_rates', { user_rate: postData }, { headers });
+      return res.data;
+    }
   }
 }
 
