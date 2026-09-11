@@ -389,6 +389,123 @@ export class ShikimoriService {
 
     return data?.animes?.[0] || null;
   }
+
+  // ==========================================
+  // 6. User Profile & Stats (REST v1 / v2)
+  // ==========================================
+  public async getUserProfile(): Promise<{
+    id: number;
+    nickname: string;
+    avatar?: string;
+    stats?: {
+      statuses?: Array<{ id: number; grouped_id: string; name: string; size: number; type: string }>;
+      full_statuses?: Array<{ id: number; grouped_id: string; name: string; size: number; type: string }>;
+    };
+  } | null> {
+    const token = await this.getValidAccessToken();
+    const tokenRecord = dbService.getAuthTokens('shikimori');
+    const userId = tokenRecord?.user_id || process.env.SHIKIMORI_USER_ID;
+
+    if (!userId) return null;
+
+    try {
+      const res = await this.client.get(`${SHIKIMORI_API_V1_URL}/users/${userId}`, {
+        headers: {
+          'User-Agent': SHIKIMORI_USER_AGENT,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+
+      return {
+        id: res.data.id,
+        nickname: res.data.nickname,
+        avatar: res.data.avatar || res.data.image?.x160,
+        stats: res.data.stats,
+      };
+    } catch (err) {
+      console.warn('Could not fetch user profile from Shikimori:', err);
+      return null;
+    }
+  }
+
+  // ==========================================
+  // 7. Calendar of Anime Episodes (REST v1)
+  // ==========================================
+  public async getCalendar(): Promise<
+    Array<{
+      next_episode: number;
+      next_episode_at: string;
+      duration?: number;
+      anime: {
+        id: number;
+        name: string;
+        russian: string;
+        score: string;
+        episodes: number;
+        episodes_aired: number;
+        image?: {
+          original?: string;
+          preview?: string;
+        };
+      };
+    }>
+  > {
+    try {
+      const res = await this.client.get(`${SHIKIMORI_API_V1_URL}/calendar`, {
+        headers: {
+          'User-Agent': SHIKIMORI_USER_AGENT,
+        },
+      });
+      return res.data || [];
+    } catch (err) {
+      console.error('Failed to fetch calendar from Shikimori:', err);
+      return [];
+    }
+  }
+
+  // ==========================================
+  // 8. Random Planned Anime for Discovery
+  // ==========================================
+  public async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
+    const token = await this.getValidAccessToken();
+    const tokenRecord = dbService.getAuthTokens('shikimori');
+    const userId = tokenRecord?.user_id || process.env.SHIKIMORI_USER_ID;
+
+    if (userId && token) {
+      try {
+        const ratesRes = await this.client.get(`${SHIKIMORI_API_V2_URL}/user_rates`, {
+          params: {
+            user_id: userId,
+            target_type: 'Anime',
+            status: 'planned',
+            limit: 50,
+          },
+          headers: {
+            'User-Agent': SHIKIMORI_USER_AGENT,
+            Authorization: `Bearer ${token}`,
+          },
+        });
+
+        const list = ratesRes.data;
+        if (Array.isArray(list) && list.length > 0) {
+          const randomItem = list[Math.floor(Math.random() * list.length)];
+          const anime = await this.getAnimeById(randomItem.target_id);
+          if (anime) return anime;
+        }
+      } catch (err) {
+        console.warn('Failed to get planned anime from user rates:', err);
+      }
+    }
+
+    // Fallback: Random Top Ranked Anime
+    const randomPage = Math.floor(Math.random() * 5) + 1;
+    const top = await this.getTopAnime(15, randomPage);
+    if (top.length > 0) {
+      return top[Math.floor(Math.random() * top.length)];
+    }
+
+    return null;
+  }
 }
 
 export const shikimoriService = new ShikimoriService();
