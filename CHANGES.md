@@ -1,6 +1,16 @@
 # 📖 ПОЛНЫЙ ОТЧЁТ ОБ ИЗМЕНЕНИЯХ И РУКОВОДСТВО К ПРОЕКТУ
 **Anime Tracker Hub (v2.0)** — Персональный автономный трекер аниме (AnimeLib ↔ Shikimori ↔ Telegram)
 
+> Актуальные примечания: приложение использует встроенный `node:sqlite`, AnimeLib API-шлюз `hapi.hentaicdn.org`, а canonical API host Shikimori — `shikimori.io`. Исторические разделы ниже описывают этапы миграции и могут содержать старые названия зависимостей или endpoint-хостов.
+
+## Текущий bridge и запуск
+
+- `start.bat` запускает Shikimori preflight перед Telegram-ботом или открывает меню локального Gemini -> GitHub bridge.
+- `scripts/ai-bridge.ts` принимает Function Calling от Gemini, блокирует секретные пути, показывает действие и требует подтверждение перед GitHub API.
+- `pnpm test:shikimori` проверяет OAuth-токены, SQLite-хранилище и `user_rates`.
+- `pnpm ai:bridge "..."` запускает bridge; для Gemini Free Tier ошибка `429` означает исчерпание квоты проекта.
+- `.env`, базы SQLite и repomix-архивы исключены из Git и не должны передаваться модели.
+
 ---
 
 ## 🎯 Что было сделано (Глобальный рефакторинг)

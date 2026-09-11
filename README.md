@@ -184,6 +184,45 @@ pnpm exec tsx -e "import { db } from './src/db/database.ts'; console.log(db.prep
 
 Не добавляйте `local.db`, `local.db-shm` или `local.db-wal` в Git.
 
+## Локальный Gemini -> GitHub bridge
+
+Bridge позволяет отправить задачу Gemini из терминала и, если модель предложит инструмент, безопасно создать коммит или GitHub Release через API. Bridge не получает доступ к `.env`, базе данных или Git-метаданным.
+
+### Настройка
+
+Добавьте только в локальный `.env`:
+
+```ini
+GEMINI_API_KEY="your_gemini_api_key"
+GEMINI_MODEL="gemini-3.8-flash"
+GITHUB_PAT="your_fine_grained_github_token"
+GITHUB_OWNER="your_github_login"
+GITHUB_REPO="your_repository"
+GITHUB_BRANCH="feat/ai-github-bridge"
+```
+
+Для Fine-grained PAT используйте доступ только к нужному репозиторию и разрешение `Contents: Read and write`. Никогда не публикуйте эти значения и не добавляйте `.env` в Git.
+
+### Запуск
+
+Интерактивный launcher:
+
+```bash
+start.bat
+```
+
+Выбор `1` запускает проверку Shikimori, а затем Telegram-бота. Выбор `2` запрашивает задачу для Gemini bridge.
+
+Прямой запуск bridge:
+
+```bash
+pnpm ai:bridge "Add a short section to README about the local bridge"
+```
+
+Перед GitHub-операцией bridge проверяет путь и содержимое, блокирует секретные файлы и запрашивает подтверждение `y/N`. Gemini-квота Free Tier ограничена; ошибка `429` означает исчерпанную квоту API, а не ошибку GitHub или локального кода.
+
+После изменений в feature-ветке проверьте diff и создайте Pull Request. Не включайте в bridge автоматический push без ручного подтверждения.
+
 ## Проверка и запуск
 
 Проверка TypeScript:
@@ -205,6 +244,9 @@ pnpm bot
 - `pnpm dev` — Vite dev server.
 - `pnpm build` — TypeScript build и Vite build.
 - `pnpm lint` — проверка TypeScript.
+- `pnpm test:shikimori` — проверка OAuth и `user_rate` Shikimori.
+- `pnpm ai:bridge "..."` — локальный Gemini -> GitHub bridge.
+- `start.bat` — меню запуска бота или bridge в Windows.
 
 После запуска используйте меню Telegram:
 
