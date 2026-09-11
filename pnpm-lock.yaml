@@ -24,13 +24,13 @@ importers:
         specifier: ^4.21.2
         version: 4.22.2
       grammy:
-        specifier: ^1.35.0
+        specifier: ^1.34.0
         version: 1.46.0
       lucide-react:
         specifier: ^0.475.0
         version: 0.475.0(react@18.3.1)
       motion:
-        specifier: ^12.4.7
+        specifier: ^12.4.3
         version: 12.43.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react:
         specifier: ^18.3.1
@@ -60,9 +60,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.4
         version: 4.7.0(vite@6.4.3(@types/node@22.20.2)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.13))
-      esbuild:
-        specifier: ^0.25.0
-        version: 0.25.12
       tailwindcss:
         specifier: ^4.0.6
         version: 4.3.3
