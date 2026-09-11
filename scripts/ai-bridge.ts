@@ -216,6 +216,12 @@ async function main() {
 }
 
 main().catch((error: any) => {
-  console.error(`Bridge failed: ${error.message}`);
+  const status = error.status || error.error?.code;
+  if (status === 429) {
+    console.error('Bridge failed: Gemini API quota exceeded (429). Wait for the quota reset, use a billed project/API key, or switch to another available model.');
+    process.exitCode = 1;
+    return;
+  }
+  console.error(`Bridge failed: ${error.message || error}`);
   process.exitCode = 1;
 });
