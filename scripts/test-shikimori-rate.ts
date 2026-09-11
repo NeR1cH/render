@@ -6,8 +6,8 @@ async function main() {
   console.log('Checking Shikimori tokens in SQLite...');
   let tokens = getTokens('shikimori');
 
-  if (!tokens && process.env.SHIKIMORI_ACCESS_TOKEN && process.env.SHIKIMORI_REFRESH_TOKEN) {
-    console.log('Initializing SQLite tokens from .env...');
+  if (process.env.SHIKIMORI_ACCESS_TOKEN && process.env.SHIKIMORI_REFRESH_TOKEN) {
+    console.log('Synchronizing SQLite tokens from .env...');
     saveTokens(
       'shikimori',
       process.env.SHIKIMORI_ACCESS_TOKEN,
