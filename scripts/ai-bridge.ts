@@ -10,8 +10,15 @@ const githubOwner = process.env.GITHUB_OWNER;
 const githubRepo = process.env.GITHUB_REPO;
 const githubBranch = process.env.GITHUB_BRANCH || 'master';
 
-if (!geminiApiKey || !githubPat || !githubOwner || !githubRepo) {
-  throw new Error('Set GEMINI_API_KEY, GITHUB_PAT, GITHUB_OWNER, and GITHUB_REPO in .env.');
+const missingConfig = [
+  ['GEMINI_API_KEY', geminiApiKey],
+  ['GITHUB_PAT', githubPat],
+  ['GITHUB_OWNER', githubOwner],
+  ['GITHUB_REPO', githubRepo],
+].filter(([, value]) => !value).map(([name]) => name);
+
+if (missingConfig.length > 0) {
+  throw new Error(`Missing bridge configuration in .env: ${missingConfig.join(', ')}`);
 }
 
 const github = axios.create({
