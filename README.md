@@ -1,196 +1,95 @@
-# Anime Tracker Bot
+# Anime Tracker Hub
 
-Автономный Telegram-бот на TypeScript для отслеживания онгоингов на AnimeLib, синхронизации статусов и эпизодов с Shikimori и быстрого поиска раздач на RuTracker.
+Локальный проект для отслеживания аниме через AnimeLib, синхронизации статусов с Shikimori и запуска Telegram-бота из одного Windows-окружения.
+
+## Что сейчас работает
+
+- AnimeLib bookmarks через рабочий endpoint `https://hapi.hentaicdn.org/api`.
+- Поддержка `Authorization: Bearer ...` и/или Cookie-сессии.
+- SQLite-хранилище с миграциями и сохранением OAuth-токенов.
+- Shikimori OAuth2 с автоматическим refresh и синхронизацией `user_rates`.
+- Telegram bot на базе `grammY`.
+- Локальный Gemini -> GitHub bridge с защитой от секретов и ручным подтверждением.
+- Windows launcher `start.bat` для preflight и мостового сценария.
 
 ## Технологический стек
 
 - Node.js 20+
-- TypeScript и `tsx`
+- TypeScript + `tsx`
 - `pnpm`
-- Telegram Bot API через `grammY`
-- HTTP-клиент `axios`
+- `grammY` для Telegram
+- `axios` и `cheerio`
 - SQLite через встроенный `node:sqlite`
-- `cheerio` для HTML fallback AnimeLib
+- `@google/genai` для Gemini bridge
 
-## Возможности
+## Быстрый старт
 
-- Получение списка «Смотрю» из AnimeLib через `hapi.hentaicdn.org`.
-- Отслеживание новых эпизодов и доступных озвучек.
-- Поиск соответствий в Shikimori.
-- Синхронизация отметки «Просмотрено» с Shikimori.
-- Telegram-карточки с постерами, прогрессом, кнопками AnimeLib, Shikimori и RuTracker.
-- Фоновая проверка серий каждые 30 минут.
-- Локальный SQLite-кэш без внешнего сервера базы данных.
-
-## Пошаговое развёртывание
-
-### 1. Клонирование и установка
+### 1. Установка
 
 ```bash
-git clone https://github.com/NeR1cH/render.git
-cd render
 pnpm install
 ```
 
-Если проект опубликован в другом репозитории, замените URL и имя каталога на свои.
-
-### 2. Создание окружения
-
-Скопируйте шаблон и заполните только локальный `.env`:
+### 2. Настройка окружения
 
 ```bash
-cp .env.example .env
-```
-
-В Windows PowerShell аналогичная команда:
-
-```powershell
 Copy-Item .env.example .env
 ```
 
-Файл `.env` нельзя добавлять в Git. Шаблон `.env.example` содержит только безопасные примеры.
+Затем заполните переменные в `.env`.
 
-## Получение credentials
+### 3. Основные команды
 
-### Telegram Bot Token и Chat ID
+```bash
+pnpm bot
+pnpm test:shikimori
+pnpm ai:bridge "Describe the requested change"
+```
 
-1. Откройте [@BotFather](https://t.me/BotFather) в Telegram.
-2. Выполните `/newbot`, задайте имя и username.
-3. Скопируйте токен в `TELEGRAM_BOT_TOKEN`.
-4. Напишите [@userinfobot](https://t.me/userinfobot), чтобы узнать числовой `TELEGRAM_CHAT_ID`.
-5. Не запускайте два процесса бота одновременно: Telegram вернёт `409 Conflict` для второго `getUpdates`.
+Для Windows можно запустить:
 
-Пример:
+```cmd
+start.bat
+```
+
+## Переменные окружения
+
+Основной шаблон доступен в `.env.example`.
+
+### Telegram
 
 ```ini
 TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 TELEGRAM_CHAT_ID="your_telegram_chat_id"
 ```
 
-### AnimeLib: токен и ID пользователя
-
-API закладок вызывается через рабочий шлюз:
+### AnimeLib
 
 ```ini
 ANIMELIB_API_URL="https://hapi.hentaicdn.org/api"
+ANIMELIB_USER_ID="your_animelib_user_id"
+ANIMELIB_COOKIE="Bearer your_access_token"
 ```
 
-Чтобы получить Bearer-токен и ID:
+Важно:
+- AnimeLib использует статус `21` для списка «Смотрю».
+- Для запросов к закладкам требуется корректный `Authorization`, `Origin`, `Referer` и `Site-Id: 5`.
+- Не публикуйте токены и Cookie из браузера.
 
-1. Войдите на [animelib.org](https://animelib.org).
-2. Нажмите `F12`.
-3. Откройте **Application** в Chrome/Edge или **Storage** в Firefox.
-4. Выберите **Local Storage** и домен AnimeLib.
-5. Найдите ключ `auth`.
-6. В объекте авторизации найдите `access_token`, обычно начинающийся с `eyJ`.
-7. Найдите числовой `id` пользователя.
-8. Запишите значения в `.env`:
+### Shikimori OAuth2
 
 ```ini
-ANIMELIB_USER_ID="9024582"
-ANIMELIB_COOKIE="Bearer eyJ..."
+SHIKIMORI_CLIENT_ID="your_client_id"
+SHIKIMORI_CLIENT_SECRET="your_client_secret"
+SHIKIMORI_ACCESS_TOKEN="your_access_token"
+SHIKIMORI_REFRESH_TOKEN="your_refresh_token"
+SHIKIMORI_USER_ID="your_user_id"
+SHIKIMORI_USER_AGENT="Anime Tracker Hub (contact: your_email@example.com)"
 ```
 
-Проверка в DevTools:
+Токены хранятся локально в SQLite и обновляются автоматически при 401/refresh-ошибках.
 
-1. Откройте вкладку **Network**.
-2. Отфильтруйте запросы по `bookmarks`.
-3. Откройте запрос `GET` к `hapi.hentaicdn.org`.
-4. Проверьте query-параметры `user_id` и `status=21`.
-5. В заголовках должны присутствовать авторизация, `Origin`, `Referer` и `Site-Id: 5`.
-
-AnimeLib использует статус `21` для списка «Смотрю». Не публикуйте токен, Cookie или экспорт Local Storage.
-
-### 3. Shikimori: OAuth2 авторизация и User ID
-
-Для синхронизации списков используется официальный OAuth2 протокол Shikimori.
-
-#### А. Создание приложения
-
-1. Авторизуйтесь на [shikimori.one](https://shikimori.one).
-2. Перейдите в **Настройки** -> **OAuth-приложения**: [shikimori.one/oauth/applications](https://shikimori.one/oauth/applications).
-3. Нажмите **«Создать приложение»**:
-   - **Название:** `Anime Tracker Bot`
-   - **Redirect URI:** `urn:ietf:wg:oauth:2.0:oob`
-   - **Области видимости (Scopes):** отметьте `user_rates` и `comments`.
-   - **Конфиденциальное:** галочка должна быть установлена.
-   - Нажмите **«Создать»** внизу страницы.
-4. Скопируйте сгенерированные `Client ID` и `Client Secret`.
-
-#### Б. Получение токенов через браузер и curl
-
-1. Сформируйте ссылку для получения одноразового кода, подставив свой `Client ID`:
-
-```text
-https://shikimori.one/oauth/authorize?client_id=ВАШ_CLIENT_ID&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&response_type=code&scope=user_rates+comments
-```
-
-2. Откройте ссылку в браузере, нажмите **«Разрешить»** и скопируйте отобразившийся одноразовый код (`code`).
-3. Сразу обменяйте код на токены. Код действует однократно:
-
-```bash
-curl -L -X POST "https://shikimori.one/oauth/token" \
-  -H "User-Agent: Anime Tracker Bot v2.0 (contact: your_email@example.com)" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&client_id=ВАШ_CLIENT_ID&client_secret=ВАШ_CLIENT_SECRET&code=ВАШ_КОД_ИЗ_БРАУЗЕРА&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
-```
-
-4. В ответе придёт JSON:
-
-```json
-{
-  "access_token": "...",
-  "refresh_token": "...",
-  "token_type": "Bearer"
-}
-```
-
-Внесите `access_token` и `refresh_token` в локальный `.env`.
-
-#### Shikimori User ID
-
-1. Откройте свой профиль на Shikimori.
-2. Найдите числовой ID через API профиля или исходный код страницы (`Ctrl+U`, поиск `data-user-id`).
-3. Запишите его:
-
-```ini
-SHIKIMORI_USER_ID="your_shikimori_numeric_id"
-```
-
-## LM Studio и Continue
-
-Если вы используете LM Studio для локального ассистирования по кодовой базе через расширение Continue в VS Code, введите в строке чата `@codebase` и нажмите Enter, чтобы переиндексировать `src/` и README.
-
-Чтобы локальная модель не получила приватные токены и базы данных, в корне проекта создан `.continueignore` со следующими исключениями:
-
-```text
-.env
-.env.*
-*.sqlite
-*.db
-dist/
-node_modules/
-```
-
-## SQLite и миграции
-
-При старте приложение автоматически создаёт `local.db` и необходимые таблицы. Для старой базы миграция добавляет колонку `custom_note` в `animelib_sync`.
-
-Проверить схему можно так:
-
-```bash
-pnpm exec tsx -e "import { db } from './src/db/database.ts'; console.log(db.prepare('PRAGMA table_info(animelib_sync)').all())"
-```
-
-Не добавляйте `local.db`, `local.db-shm` или `local.db-wal` в Git.
-
-## Локальный Gemini -> GitHub bridge
-
-Bridge позволяет отправить задачу Gemini из терминала и, если модель предложит инструмент, безопасно создать коммит или GitHub Release через API. Bridge не получает доступ к `.env`, базе данных или Git-метаданным.
-
-### Настройка
-
-Добавьте только в локальный `.env`:
+### Local Gemini -> GitHub bridge
 
 ```ini
 GEMINI_API_KEY="your_gemini_api_key"
@@ -201,62 +100,104 @@ GITHUB_REPO="your_repository"
 GITHUB_BRANCH="feat/ai-github-bridge"
 ```
 
-Для Fine-grained PAT используйте доступ только к нужному репозиторию и разрешение `Contents: Read and write`. Никогда не публикуйте эти значения и не добавляйте `.env` в Git.
+Требования к PAT:
+- Fine-grained token
+- Доступ только к нужному репозиторию
+- Разрешение `Contents: Read and write`
+- Не храните `PAT` в Git и не добавляйте `.env` в коммиты
 
-### Запуск
-
-Интерактивный launcher:
-
-```bash
-start.bat
-```
-
-Выбор `1` запускает проверку Shikimori, а затем Telegram-бота. Выбор `2` запрашивает задачу для Gemini bridge.
-
-Прямой запуск bridge:
-
-```bash
-pnpm ai:bridge "Add a short section to README about the local bridge"
-```
-
-Перед GitHub-операцией bridge проверяет путь и содержимое, блокирует секретные файлы и запрашивает подтверждение `y/N`. Gemini-квота Free Tier ограничена; ошибка `429` означает исчерпанную квоту API, а не ошибку GitHub или локального кода.
-
-После изменений в feature-ветке проверьте diff и создайте Pull Request. Не включайте в bridge автоматический push без ручного подтверждения.
-
-## Проверка и запуск
-
-Проверка TypeScript:
-
-```bash
-pnpm exec tsc --noEmit
-```
-
-Запуск Telegram-бота:
+## Запуск Telegram-бота
 
 ```bash
 pnpm bot
 ```
 
-Доступные npm-скрипты:
+После запуска бот готов к проверке обновлений и синхронизации статусов.
 
-- `pnpm bot` — Telegram-бот.
-- `pnpm server` — локальный Express-сервер.
-- `pnpm dev` — Vite dev server.
-- `pnpm build` — TypeScript build и Vite build.
-- `pnpm lint` — проверка TypeScript.
-- `pnpm test:shikimori` — проверка OAuth и `user_rate` Shikimori.
-- `pnpm ai:bridge "..."` — локальный Gemini -> GitHub bridge.
-- `start.bat` — меню запуска бота или bridge в Windows.
+## Проверка Shikimori до запуска бота
 
-После запуска используйте меню Telegram:
+```bash
+pnpm test:shikimori
+```
 
-- **🔄 Проверить серии** — получить закладки и найти новые эпизоды.
-- **📺 Мой список** — показать отслеживаемые тайтлы.
-- **📅 Календарь** — посмотреть расписание релизов.
-- **🎲 Что глянуть?** — получить рекомендацию.
-- **⚙️ Настройки** — настроить озвучки и качество.
+Команда проверяет OAuth-токены, SQLite-хранилище и запись `user_rates` для тестового аниме.
 
-## Публикация на GitHub
+## Локальный Gemini -> GitHub bridge
+
+Bridge используется для безопасной отправки задачи в Gemini и, если модель предлагает tool call, создания или обновления файла в GitHub и публикации release.
+
+### Безопасность
+
+Перед GitHub-операцией bridge:
+- проверяет путь файла,
+- блокирует `.env`, `.db`, `.sqlite`, закрытые ключи и подозрительные паттерны,
+- требует ручного подтверждения `y/N`.
+
+### Запуск
+
+```bash
+pnpm ai:bridge "Add a short section to README about the local bridge"
+```
+
+Или через launcher:
+
+```cmd
+start.bat
+```
+
+Выбор `2` запускает bridge-подсказку.
+
+> Важно: при `429` в Gemini это означает исчерпание квоты Free Tier. Это не относится к GitHub или локальному коду.
+
+## Windows launcher
+
+`start.bat` предоставляет простой интерфейс:
+- `1` — preflight Shikimori + запуск Telegram-бота
+- `2` — запуск Gemini bridge
+- `Q` — выход
+
+Launcher печатает ASCII-меню и работает как безопасный контрольный центр для локальной разработки.
+
+## SQLite и миграции
+
+При старте проект создаёт `local.db` и необходимые таблицы. Для старой базы добавляется миграция `custom_note` в `animelib_sync`.
+
+Проверить схему можно так:
+
+```bash
+pnpm exec tsx -e "import { db } from './src/db/database.ts'; console.log(db.prepare('PRAGMA table_info(animelib_sync)').all())"
+```
+
+Не добавляйте в Git:
+- `.env`
+- `.db`, `.sqlite`, `.sqlite3`
+- `local.db*`
+- временные логи и repomix-артефакты
+
+## Скрипты проекта
+
+```json
+{
+  "bot": "tsx src/bot/index.ts",
+  "server": "tsx server.ts",
+  "dev": "vite",
+  "build": "tsc -b && vite build",
+  "lint": "tsc --noEmit",
+  "test:shikimori": "tsx scripts/test-shikimori-rate.ts",
+  "ai:bridge": "tsx scripts/ai-bridge.ts"
+}
+```
+
+## Безопасность и разработка
+
+- Храните секреты только в локальном `.env`.
+- Не отправляйте `.env`, SQLite, ключи, токены и PAT в модель/репозиторий.
+- Перед любым GitHub-изменением через bridge проверяйте diff и подтверждайте действия вручную.
+- Не используйте автоматический push без подтверждения владельцем процесса.
+
+## История
+
+Последние изменения зафиксированы в [CHANGES.md](CHANGES.md).
 
 Перед коммитом проверьте, что секреты и локальная база не попали в индекс:
 
