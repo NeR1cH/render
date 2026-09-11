@@ -21,6 +21,18 @@ if (missingConfig.length > 0) {
   throw new Error(`Missing bridge configuration in .env: ${missingConfig.join(', ')}`);
 }
 
+const nonAsciiConfig = [
+  ['GEMINI_API_KEY', geminiApiKey],
+  ['GITHUB_PAT', githubPat],
+  ['GITHUB_OWNER', githubOwner],
+  ['GITHUB_REPO', githubRepo],
+  ['GITHUB_BRANCH', githubBranch],
+].filter(([, value]) => /[^\x00-\x7F]/.test(value || '')).map(([name]) => name);
+
+if (nonAsciiConfig.length > 0) {
+  throw new Error(`Bridge configuration must contain ASCII values: ${nonAsciiConfig.join(', ')}`);
+}
+
 const github = axios.create({
   baseURL: `https://api.github.com/repos/${githubOwner}/${githubRepo}`,
   headers: {
