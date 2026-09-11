@@ -101,48 +101,51 @@ ANIMELIB_COOKIE="Bearer eyJ..."
 
 AnimeLib использует статус `21` для списка «Смотрю». Не публикуйте токен, Cookie или экспорт Local Storage.
 
-### Shikimori OAuth2
+### 3. Shikimori: OAuth2 авторизация и User ID
 
-#### Создание OAuth-приложения
+Для синхронизации списков используется официальный OAuth2 протокол Shikimori.
 
-1. Войдите на [shikimori.one](https://shikimori.one).
-2. Откройте настройки OAuth-приложений: [shikimori.one/oauth/applications](https://shikimori.one/oauth/applications).
-3. Создайте приложение.
-4. Укажите название, например `Anime Tracker Bot`.
-5. Для redirect URI используйте значение, поддерживаемое текущей формой Shikimori. Для старого out-of-band flow это `urn:ietf:wg:oauth:2.0:oob`.
-6. Скопируйте `Client ID` и `Client Secret` в `.env`.
+#### А. Создание приложения
 
-```ini
-SHIKIMORI_CLIENT_ID="your_shikimori_client_id"
-SHIKIMORI_CLIENT_SECRET="your_shikimori_client_secret"
-SHIKIMORI_USER_AGENT="Anime Tracker Hub (contact: your_email@example.com)"
-```
+1. Авторизуйтесь на [shikimori.one](https://shikimori.one).
+2. Перейдите в **Настройки** -> **OAuth-приложения**: [shikimori.one/oauth/applications](https://shikimori.one/oauth/applications).
+3. Нажмите **«Создать приложение»**:
+   - **Название:** `Anime Tracker Bot`
+   - **Redirect URI:** `urn:ietf:wg:oauth:2.0:oob`
+   - **Области видимости (Scopes):** отметьте `user_rates` и `comments`.
+   - **Конфиденциальное:** галочка должна быть установлена.
+   - Нажмите **«Создать»** внизу страницы.
+4. Скопируйте сгенерированные `Client ID` и `Client Secret`.
 
-#### Получение access и refresh token
+#### Б. Получение токенов через браузер и curl
 
-Сформируйте URL авторизации, заменив `CLIENT_ID`:
+1. Сформируйте ссылку для получения одноразового кода, подставив свой `Client ID`:
 
 ```text
-https://shikimori.one/oauth/authorize?client_id=CLIENT_ID&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&response_type=code&scope=user_rates+comments
+https://shikimori.one/oauth/authorize?client_id=ВАШ_CLIENT_ID&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob&response_type=code&scope=user_rates+comments
 ```
 
-После подтверждения доступа обменяйте одноразовый `code` на токены:
+2. Откройте ссылку в браузере, нажмите **«Разрешить»** и скопируйте отобразившийся одноразовый код (`code`).
+3. Сразу обменяйте код на токены. Код действует однократно:
 
 ```bash
 curl -L -X POST "https://shikimori.one/oauth/token" \
-  -H "User-Agent: Anime Tracker Hub (contact: your_email@example.com)" \
+  -H "User-Agent: Anime Tracker Bot v2.0 (contact: your_email@example.com)" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&client_id=CLIENT_ID&client_secret=CLIENT_SECRET&code=AUTH_CODE&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
+  -d "grant_type=authorization_code&client_id=ВАШ_CLIENT_ID&client_secret=ВАШ_CLIENT_SECRET&code=ВАШ_КОД_ИЗ_БРАУЗЕРА&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
 ```
 
-Сохраните полученные значения локально:
+4. В ответе придёт JSON:
 
-```ini
-SHIKIMORI_ACCESS_TOKEN="your_access_token"
-SHIKIMORI_REFRESH_TOKEN="your_refresh_token"
+```json
+{
+  "access_token": "...",
+  "refresh_token": "...",
+  "token_type": "Bearer"
+}
 ```
 
-Если Shikimori изменит или отключит OOB-flow, используйте redirect URI и flow, доступные в форме OAuth-приложения, и обновите команду обмена кода соответственно.
+Внесите `access_token` и `refresh_token` в локальный `.env`.
 
 #### Shikimori User ID
 
@@ -152,6 +155,21 @@ SHIKIMORI_REFRESH_TOKEN="your_refresh_token"
 
 ```ini
 SHIKIMORI_USER_ID="your_shikimori_numeric_id"
+```
+
+## LM Studio и Continue
+
+Если вы используете LM Studio для локального ассистирования по кодовой базе через расширение Continue в VS Code, введите в строке чата `@codebase` и нажмите Enter, чтобы переиндексировать `src/` и README.
+
+Чтобы локальная модель не получила приватные токены и базы данных, в корне проекта создан `.continueignore` со следующими исключениями:
+
+```text
+.env
+.env.*
+*.sqlite
+*.db
+dist/
+node_modules/
 ```
 
 ## SQLite и миграции
