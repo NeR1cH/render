@@ -1,5 +1,5 @@
-import axios, { AxiosInstance } from 'axios';
-import { dbService } from '../db/database.js';
+import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+import { dbService, getTokens, saveTokens } from '../db/database.js';
 
 export interface ShikimoriPoster {
   id: string;
@@ -35,20 +35,134 @@ export interface UserRateInput {
   episodes?: number;
 }
 
+const SHIKIMORI_URL = 'https://shikimori.one';
+
+export const shikimoriClient = axios.create({
+  baseURL: SHIKIMORI_URL,
+  timeout: 15000,
+  headers: {
+    'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: boykonik2@gmail.com)',
+    'Content-Type': 'application/json',
+  },
+  beforeRedirect: (options: any, responseDetails: any) => {
+    const authorization = responseDetails.headers?.authorization;
+    if (authorization) {
+      options.headers = options.headers || {};
+      options.headers.Authorization = authorization;
+    }
+  },
+});
+
+shikimoriClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  const tokens = getTokens('shikimori');
+  const token = tokens?.access_token || process.env.SHIKIMORI_ACCESS_TOKEN;
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+shikimoriClient.interceptors.response.use(
+  (response) => response,
+  async (error: AxiosError) => {
+    const originalRequest = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
+    if (error.response?.status !== 401 || !originalRequest || originalRequest._retry) {
+      return Promise.reject(error);
+    }
+
+    originalRequest._retry = true;
+    const tokens = getTokens('shikimori');
+    const refreshToken = tokens?.refresh_token || process.env.SHIKIMORI_REFRESH_TOKEN;
+    if (!refreshToken) {
+      console.error('[Shikimori] Missing refresh token for session renewal.');
+      return Promise.reject(error);
+    }
+
+    try {
+      console.log('[Shikimori] Access token expired, refreshing session...');
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: process.env.SHIKIMORI_CLIENT_ID || '',
+        client_secret: process.env.SHIKIMORI_CLIENT_SECRET || '',
+        refresh_token: refreshToken,
+      });
+      const refreshRes = await axios.post(`${SHIKIMORI_URL}/oauth/token`, params.toString(), {
+        headers: {
+          'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: githubsup972@gmail.com)',
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+      const { access_token, refresh_token: newRefreshToken, expires_in } = refreshRes.data;
+      saveTokens('shikimori', access_token, newRefreshToken || refreshToken, expires_in || 86400);
+      originalRequest.headers.Authorization = `Bearer ${access_token}`;
+      return shikimoriClient(originalRequest);
+    } catch (refreshError) {
+      console.error('[Shikimori] Token refresh failed:', refreshError);
+      return Promise.reject(refreshError);
+    }
+  }
+);
+
+export type ShikimoriStatus = 'planned' | 'watching' | 'completed' | 'on_hold' | 'dropped';
+
+export function mapAnimeLibStatusToShikimori(statusId: number): ShikimoriStatus {
+  switch (statusId) {
+    case 1: return 'planned';
+    case 2: return 'watching';
+    case 3: return 'completed';
+    case 4: return 'dropped';
+    case 5: return 'on_hold';
+    default: return 'planned';
+  }
+}
+
+export interface UserRatePayload {
+  user_id: number;
+  target_id: number;
+  target_type: 'Anime';
+  status: ShikimoriStatus;
+  episodes?: number;
+  score?: number;
+}
+
+export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
+  try {
+    const response = await shikimoriClient.post('/api/v2/user_rates', { user_rate: payload });
+    return response.data;
+  } catch (error: any) {
+    if (error.response?.status !== 422) {
+      throw error;
+    }
+
+    const ratesResponse = await shikimoriClient.get('/api/v2/user_rates', {
+      params: {
+        user_id: payload.user_id,
+        target_id: payload.target_id,
+        target_type: 'Anime',
+      },
+    });
+    const existingRate = Array.isArray(ratesResponse.data) ? ratesResponse.data[0] : undefined;
+    if (!existingRate?.id) {
+      throw error;
+    }
+
+    const patchResponse = await shikimoriClient.patch(`/api/v2/user_rates/${existingRate.id}`, {
+      user_rate: {
+        status: payload.status,
+        episodes: payload.episodes,
+        score: payload.score,
+      },
+    });
+    return patchResponse.data;
+  }
+}
+
 export class ShikimoriService {
   private client: AxiosInstance;
-  private readonly baseUrl = 'https://shikimori.one';
   private readonly graphqlUrl = 'https://shikimori.one/api/graphql';
 
   constructor() {
-    this.client = axios.create({
-      baseURL: this.baseUrl,
-      timeout: 15000,
-      headers: {
-        'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'ANIME ASSISTANT v2.0 (contact: githubsup972@gmail.com)',
-        'Content-Type': 'application/json',
-      },
-    });
+    this.client = shikimoriClient;
   }
 
   private async getHeaders() {

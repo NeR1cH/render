@@ -19,6 +19,16 @@ db.exec('CREATE TABLE IF NOT EXISTS auth_tokens (' +
   'updated_at INTEGER' +
 ');');
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS oauth_tokens (
+    service TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 db.exec('CREATE TABLE IF NOT EXISTS anime_match_cache (' +
   'normalized_title TEXT PRIMARY KEY, ' +
   'shiki_id INTEGER, ' +
@@ -80,6 +90,30 @@ export interface UserPreferencesRecord {
   quiet_hours_enabled: number;
   quiet_start_hour: number;
   quiet_end_hour: number;
+}
+
+export interface OAuthTokenRecord {
+  service: string;
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+}
+
+export function saveTokens(service: string, accessToken: string, refreshToken: string, expiresIn: number): void {
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresIn;
+  db.prepare(`
+    INSERT INTO oauth_tokens (service, access_token, refresh_token, expires_at, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(service) DO UPDATE SET
+      access_token = excluded.access_token,
+      refresh_token = excluded.refresh_token,
+      expires_at = excluded.expires_at,
+      updated_at = datetime('now')
+  `).run(service, accessToken, refreshToken, expiresAt);
+}
+
+export function getTokens(service: string): OAuthTokenRecord | undefined {
+  return db.prepare('SELECT * FROM oauth_tokens WHERE service = ?').get(service) as unknown as OAuthTokenRecord | undefined;
 }
 
 export const dbService = {

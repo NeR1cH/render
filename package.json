@@ -8,7 +8,8 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "server": "tsx server.ts",
-    "bot": "tsx src/bot/index.ts"
+    "bot": "tsx src/bot/index.ts",
+    "test:shikimori": "tsx scripts/test-shikimori-rate.ts"
   },
   "dependencies": {
     "axios": "^1.7.9",
