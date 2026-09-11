@@ -202,7 +202,14 @@ async function main() {
           : `Unknown function: ${call.name}`;
       console.log(result);
     } catch (error: any) {
-      console.error(`Bridge action failed: ${error.response?.data?.message || error.message}`);
+      const status = error.response?.status;
+      if (status === 401) {
+        console.error('Bridge action failed: GitHub PAT was rejected (401). Create a new fine-grained token and update GITHUB_PAT in .env.');
+      } else if (status === 403) {
+        console.error('Bridge action failed: GitHub denied this operation (403). Check the PAT repository and Contents permissions.');
+      } else {
+        console.error(`Bridge action failed: ${error.response?.data?.message || error.message}`);
+      }
       process.exitCode = 1;
     }
   }
