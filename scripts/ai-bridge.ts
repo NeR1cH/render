@@ -179,7 +179,7 @@ async function main() {
   }
 
   const response = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
     contents: requestContext,
     config: {
       systemInstruction: 'You maintain this TypeScript repository. Never request secrets or modify environment, database, or Git metadata files. Ask for clarification when the full file content is unavailable.',
