@@ -35,7 +35,7 @@ export interface UserRateInput {
   episodes?: number;
 }
 
-const SHIKIMORI_URL = 'https://shikimori.one';
+const SHIKIMORI_URL = process.env.SHIKIMORI_API_URL || 'https://shikimori.io';
 
 export const shikimoriClient = axios.create({
   baseURL: SHIKIMORI_URL,
@@ -159,7 +159,7 @@ export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
 
 export class ShikimoriService {
   private client: AxiosInstance;
-  private readonly graphqlUrl = 'https://shikimori.one/api/graphql';
+  private readonly graphqlUrl = `${SHIKIMORI_URL}/api/graphql`;
 
   constructor() {
     this.client = shikimoriClient;
