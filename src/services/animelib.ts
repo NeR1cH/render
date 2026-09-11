@@ -19,7 +19,7 @@ export interface AnimeLibEpisodeInfo {
 
 export class AnimeLibService {
   private client: AxiosInstance;
-  private readonly baseUrl = 'https://animelib.me';
+  private readonly baseUrl = process.env.ANIMELIB_API_URL || 'https://hapi.hentaicdn.org/api';
 
   constructor() {
     this.client = axios.create({
@@ -35,8 +35,19 @@ export class AnimeLibService {
     });
   }
 
-  private getCookie(): string {
-    return process.env.ANIMELIB_COOKIE || '';
+  private getAuthHeaders(): Record<string, string> {
+    const raw = process.env.ANIMELIB_COOKIE || '';
+    if (!raw) return {};
+
+    if (raw.startsWith('Bearer ') || raw.startsWith('ey')) {
+      const token = raw.replace(/^Bearer\s+/i, '').trim();
+      return {
+        'Authorization': `Bearer ${token}`,
+        'Cookie': `token=${token}; auth_token=${token}`,
+      };
+    }
+
+    return { 'Cookie': raw };
   }
 
   static normalizeTitle(title: string): string {
@@ -54,57 +65,114 @@ export class AnimeLibService {
   }
 
   async getAllWatching(): Promise<AnimeLibBookmarkItem[]> {
-    const cookie = this.getCookie();
-    if (!cookie) {
+    const headers = this.getAuthHeaders();
+    if (Object.keys(headers).length === 0) {
       console.warn('[AnimeLib] ANIMELIB_COOKIE is empty. Skipping bookmarks check.');
       return [];
     }
 
-    try {
-      const response = await this.client.get('/api/bookmarks', {
-        params: { status: 1, page: 1, limit: 60 },
-        headers: { Cookie: cookie },
-      });
+    const userId = process.env.ANIMELIB_USER_ID || '9024582';
+    const requestHeaders = {
+      ...headers,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': 'https://animelib.org/',
+      'Origin': 'https://animelib.org',
+      'Site-Id': '5',
+    };
 
-      const items = response.data?.data || [];
+    const transformItems = (rawItems: any[]): AnimeLibBookmarkItem[] => {
       const result: AnimeLibBookmarkItem[] = [];
 
-      for (const item of items) {
-        const media = item.media || item;
+      for (const item of rawItems) {
+        const media = item.media || item.anime || item;
+        const mediaId = media.id || item.media_id || item.anime_id;
+        if (!mediaId) {
+          console.warn('[AnimeLib] Skipping bookmark without media ID');
+          continue;
+        }
+
         const entry: AnimeLibBookmarkItem = {
-          media_id: media.id || item.media_id,
-          slug_url: media.slug_url || media.slug || String(media.id),
-          name: media.name || media.eng_name || '',
-          rus_name: media.rus_name || '',
+          media_id: mediaId,
+          slug_url: media.slug_url || media.slug || String(mediaId),
+          name: media.name || media.eng_name || media.title || '',
+          rus_name: media.rus_name || media.russian || '',
           current_progress_number: item.current_item_number || item.item_number || 0,
           last_item_number: media.last_item_number || 0,
           poster: media.cover?.default || media.poster,
         };
 
-        dbService.upsertSyncItem({
-          media_id: entry.media_id,
-          title: entry.name,
-          rus_title: entry.rus_name,
-          status: 'watching',
-          last_tracked_episode: entry.current_progress_number || 0,
-        });
+        try {
+          dbService.upsertSyncItem({
+            media_id: entry.media_id,
+            title: entry.name,
+            rus_title: entry.rus_name,
+            status: 'watching',
+            last_tracked_episode: entry.current_progress_number || 0,
+          });
+        } catch (dbError: any) {
+          console.warn('[AnimeLib] Could not sync bookmark to local DB:', dbError?.message);
+        }
 
         result.push(entry);
       }
 
       return result;
-    } catch (err: any) {
-      console.error('[AnimeLib Bookmarks Error]:', err.message);
-      return [];
+    };
+
+    try {
+      const response = await this.client.get('/bookmarks', {
+        params: {
+          user_id: userId,
+          status: 21,
+          page: 1,
+          limit: 60,
+          sort_by: 'created_at',
+          sort_type: 'desc',
+        },
+        headers: requestHeaders,
+      });
+
+      console.log(`[AnimeLib] Successfully fetched ${response.data?.data?.length ?? 0} bookmarks via hapi.hentaicdn.org`);
+      const items = response.data?.data || response.data || [];
+      return transformItems(items);
+    } catch (error: any) {
+      console.warn(
+        '[AnimeLib] Primary /bookmarks failed, trying /users/{id}/bookmarks:',
+        error?.response?.status || error?.message
+      );
+
+      try {
+        const fallbackRes = await this.client.get(`/users/${userId}/bookmarks`, {
+          params: {
+            status: 21,
+            page: 1,
+            limit: 60,
+            sort_by: 'created_at',
+            sort_type: 'desc',
+          },
+          headers: requestHeaders,
+        });
+        const items = fallbackRes.data?.data || fallbackRes.data || [];
+        console.log('[AnimeLib] Successfully fetched bookmarks via fallback:', items.length);
+        return transformItems(items);
+      } catch (fallbackError: any) {
+        console.error('[AnimeLib] Both endpoints failed:', fallbackError?.response?.status, fallbackError?.message);
+        return [];
+      }
     }
   }
 
   async getMediaEpisodes(mediaId: number, slugUrl?: string): Promise<AnimeLibEpisodeInfo> {
-    const cookie = this.getCookie();
-    const headers = cookie ? { Cookie: cookie } : {};
+    const headers = this.getAuthHeaders();
 
     try {
-      const apiRes = await this.client.get(`https://api.lib.social/api/anime/${mediaId}/episodes`, { headers });
+      const apiRes = await this.client.get(`/anime/${mediaId}/episodes`, {
+        headers: {
+          ...headers,
+          'Site-Id': '5',
+        },
+      });
       const episodesData = apiRes.data?.data || [];
 
       let maxEp = 0;
@@ -128,7 +196,7 @@ export class AnimeLibService {
     } catch {
       // Fallback: Web Scraping через cheerio
       try {
-        const targetUrl = slugUrl ? `https://animelib.me/ru/anime/${slugUrl}` : `https://animelib.me/ru/anime/${mediaId}`;
+        const targetUrl = slugUrl ? `https://animelib.org/ru/anime/${slugUrl}` : `https://animelib.org/ru/anime/${mediaId}`;
         const pageRes = await this.client.get(targetUrl, { headers });
         const $ = cheerio.load(pageRes.data);
 

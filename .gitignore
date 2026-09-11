@@ -1,11 +1,18 @@
 # Node & build
-node_modules/
-dist/
+node_modules
+dist
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
 .DS_Store
 bun.lock
 
 # Environment secrets
 .env
+.env.local
 
 # Docker volumes and local runtime data
 postgres_data/
