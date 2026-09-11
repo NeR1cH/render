@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "server": "tsx server.ts",
     "bot": "tsx src/bot/index.ts",
-    "test:shikimori": "tsx scripts/test-shikimori-rate.ts"
+    "test:shikimori": "tsx scripts/test-shikimori-rate.ts",
+    "ai:bridge": "tsx scripts/ai-bridge.ts"
   },
   "dependencies": {
     "axios": "^1.7.9",
@@ -24,6 +25,8 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@google/genai": "^2.21.0",
+    "@google/genai": "^2.21.0",
     "@tailwindcss/vite": "^4.0.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
