@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { GoogleGenAI, Type } from '@google/genai';
 import axios from 'axios';
+import { readFile } from 'node:fs/promises';
 import * as readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
@@ -171,9 +172,15 @@ async function main() {
   }
 
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  let requestContext = prompt;
+  if (/\breadme\b/i.test(prompt)) {
+    const readme = await readFile('README.md', 'utf8');
+    requestContext += `\n\nHere is the current README.md. Preserve its existing content and return the complete replacement file when using commit_file:\n\n<current-readme>\n${readme}\n</current-readme>`;
+  }
+
   const response = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-    contents: prompt,
+    model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+    contents: requestContext,
     config: {
       systemInstruction: 'You maintain this TypeScript repository. Never request secrets or modify environment, database, or Git metadata files. Ask for clarification when the full file content is unavailable.',
       tools: [{ functionDeclarations: [commitFileTool, releaseTool] }],
