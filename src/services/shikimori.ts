@@ -289,17 +289,116 @@ export class ShikimoriService {
     }
   }
 
-  async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
+  async getUserPlannedAnimeIds(limit: number = 50, page: number = 1): Promise<number[]> {
+    const userId = process.env.SHIKIMORI_USER_ID;
+    if (!userId) return [];
+
     try {
-      const searchResults = await this.searchAnime('', 10);
-      if (searchResults && searchResults.length > 0) {
-        const random = searchResults[Math.floor(Math.random() * searchResults.length)];
-        return await this.getAnimeById(random.id);
-      }
-      return null;
-    } catch {
-      return null;
+      const res = await this.client.get('/api/v2/user_rates', {
+        params: { user_id: userId, target_type: 'Anime', status: 'planned', limit, page },
+        headers: await this.getHeaders(),
+      });
+      return (res.data || []).map((r: any) => Number(r.target_id)).filter(Boolean);
+    } catch (err: any) {
+      console.error('[Shikimori Planned Error]', err.message);
+      return [];
     }
+  }
+
+  async getOngoingAnime(limit: number = 25, page: number = 1): Promise<ShikimoriAnime[]> {
+    const query = `
+      query GetOngoing($page: PositiveInt, $limit: PositiveInt) {
+        animes(status: "ongoing", order: popularity, page: $page, limit: $limit) {
+          id
+          name
+          russian
+          score
+          status
+          episodes
+          episodesAired
+          description
+          genres {
+            id
+            name
+            russian
+          }
+          poster {
+            id
+            originalUrl
+            mainUrl
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.client.post(
+        this.graphqlUrl,
+        { query, variables: { page, limit } },
+        { headers: await this.getHeaders() }
+      );
+      return response.data?.data?.animes || [];
+    } catch (err: any) {
+      console.error('[Shikimori Ongoing Error]', err.message);
+      return [];
+    }
+  }
+
+  async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
+    const rec = await this.getRandomRecommendation('all');
+    return rec ? rec.anime : null;
+  }
+
+  async getRandomRecommendation(
+    category: 'all' | 'planned' | 'ongoing' = 'all',
+    excludeIds: number[] = []
+  ): Promise<{ anime: ShikimoriAnime; source: 'planned' | 'ongoing' } | null> {
+    const userId = process.env.SHIKIMORI_USER_ID;
+    const preferPlanned = category === 'planned' || (category === 'all' && Math.random() < 0.5);
+
+    if (preferPlanned && userId) {
+      try {
+        const randomPage = Math.floor(Math.random() * 20) + 1;
+        const plannedIds = await this.getUserPlannedAnimeIds(50, randomPage);
+        const candidates = plannedIds.filter((id) => !excludeIds.includes(id));
+        const pool = candidates.length > 0 ? candidates : plannedIds;
+        if (pool.length > 0) {
+          const randomId = pool[Math.floor(Math.random() * pool.length)];
+          const anime = await this.getAnimeById(randomId);
+          if (anime) {
+            return { anime, source: 'planned' };
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Shikimori] Failed to fetch planned recommendation:', err.message);
+      }
+    }
+
+    try {
+      const randomPage = Math.floor(Math.random() * 3) + 1;
+      const ongoings = await this.getOngoingAnime(20, randomPage);
+      const candidates = ongoings.filter((a) => !excludeIds.includes(Number(a.id)));
+      const pool = candidates.length > 0 ? candidates : ongoings;
+      if (pool.length > 0) {
+        const picked = pool[Math.floor(Math.random() * pool.length)];
+        const fullAnime = picked.description ? picked : (await this.getAnimeById(picked.id)) || picked;
+        return { anime: fullAnime, source: 'ongoing' };
+      }
+    } catch (err: any) {
+      console.error('[Shikimori] Failed to fetch ongoing recommendation:', err.message);
+    }
+
+    // Ultimate fallback if GraphQL/rates failed
+    try {
+      const searchResults = await this.searchAnime('', 20);
+      if (searchResults.length > 0) {
+        const picked = searchResults[Math.floor(Math.random() * searchResults.length)];
+        const anime = await this.getAnimeById(picked.id);
+        if (anime) return { anime, source: 'ongoing' };
+      }
+    } catch {}
+
+    return null;
   }
 
   async updateUserRate(rate: UserRateInput): Promise<any> {

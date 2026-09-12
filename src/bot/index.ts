@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard, Keyboard, Context } from 'grammy';
 import dotenv from 'dotenv';
-import { animelibService, ANIMELIB_WEB_URL } from '../services/animelib';
+import { animelibService, AnimeLibService, ANIMELIB_WEB_URL } from '../services/animelib';
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 
@@ -484,10 +484,12 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
   const favOnlyStatus = prefs.notify_only_favorites ? 'Да (только в моих студиях)' : 'Нет (любые релизы)';
 
   const text = [
-    '⚙️ <b>Центр персональных настроек</b>',
+    '⚙️ <b>Панель настроек бота и уведомлений</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    '<i>Управление фильтрами озвучки, качеством и интервалами:</i>',
     '',
     `🎙 <b>Любимые озвучки:</b> 🔥 <code>${escapeHtml(favList)}</code>`,
-    `🎯 <b>Уведомления:</b> <code>${favOnlyStatus}</code>`,
+    `🎯 <b>Фильтр релизов:</b> <code>${favOnlyStatus}</code>`,
     `📺 <b>Качество торрентов:</b> <code>${prefs.preferred_quality || '1080p'}</code>`,
     `🎨 <b>Стиль карточек:</b> <code>${prefs.card_style || 'full'}</code>`,
     `⏱ <b>Интервал проверки:</b> <code>каждые ${prefs.check_interval_min || 30} мин</code>`,
@@ -599,36 +601,178 @@ async function showWatchingList(ctx: Context) {
   await ctx.reply(totalText, { parse_mode: 'HTML', reply_markup: kb });
 }
 
-async function showAnimeCalendar(ctx: Context) {
-  await ctx.reply('📅 <i>Загружаю персональный график выхода серий...</i>', { parse_mode: 'HTML' });
+function formatRelativeTime(targetDate: Date): string {
+  const now = new Date();
+  const diffMs = targetDate.getTime() - now.getTime();
+  if (diffMs < 0) return 'уже вышло';
+  const diffMinutes = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMinutes / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMinutes < 60) {
+    return `через ${diffMinutes} мин`;
+  }
+  if (diffHours < 24) {
+    const isToday = now.getDate() === targetDate.getDate();
+    return isToday ? `сегодня (через ${diffHours} ч)` : `через ${diffHours} ч`;
+  }
+  if (diffDays === 1) {
+    return 'завтра';
+  }
+  return `через ${diffDays} дн.`;
+}
+
+async function showAnimeCalendar(ctx: Context, isGlobal: boolean = false) {
+  const promptMsg = isGlobal
+    ? '🌐 <i>Загружаю общий график выхода онгоингов сезона...</i>'
+    : '📅 <i>Загружаю график выхода серий для ваших тайтлов...</i>';
+  await ctx.reply(promptMsg, { parse_mode: 'HTML' });
+
   try {
     const calendar = await shikimoriService.getCalendar();
     if (!calendar || calendar.length === 0) {
-      return ctx.reply('📭 На ближайшие дни расписание серий отсутствует.');
+      return ctx.reply('📭 В официальном расписании на ближайшие дни релизы отсутствуют.');
     }
 
-    // Sort or filter up to 8 closest releases
-    const items = calendar.slice(0, 8);
-    const lines = items.map((c) => {
+    if (isGlobal) {
+      const items = calendar.slice(0, 10);
+      const lines = items.map((c) => {
+        const date = new Date(c.next_episode_at);
+        const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        const dayStr = date.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' });
+        const relStr = formatRelativeTime(date);
+        return `• <b>${escapeHtml(c.anime.russian || c.anime.name)}</b> — Эпизод <code>#${c.next_episode}</code>\n  ⏰ <i>${dayStr} в ${timeStr}</i> (${relStr})`;
+      });
+
+      const kb = new InlineKeyboard()
+        .text('📅 Только мои аниме', 'show_calendar')
+        .text('📺 Мой список', 'list_watching');
+
+      const text = `🌐 <b>Общий календарь онгоингов (Ближайшие релизы):</b>\n\n${lines.join('\n\n')}`;
+      return await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+
+    // Personal Calendar: Filter only anime the user is watching!
+    const watchingDb = dbService.getAllSyncItems('watching');
+    let watchingLib: any[] = [];
+    try {
+      watchingLib = await animelibService.getAllWatching();
+    } catch {}
+
+    const watchingShikiIds = new Set<number>();
+    const watchingTitleKeywords = new Set<string>();
+
+    for (const w of watchingDb) {
+      if (w.shiki_id) watchingShikiIds.add(Number(w.shiki_id));
+      if (w.title) watchingTitleKeywords.add(AnimeLibService.normalizeTitle(w.title).toLowerCase());
+      if (w.rus_title) watchingTitleKeywords.add(AnimeLibService.normalizeTitle(w.rus_title).toLowerCase());
+    }
+
+    for (const a of watchingLib) {
+      if (a.name) watchingTitleKeywords.add(AnimeLibService.normalizeTitle(a.name).toLowerCase());
+      if (a.rus_name) watchingTitleKeywords.add(AnimeLibService.normalizeTitle(a.rus_name).toLowerCase());
+    }
+
+    const matchedEntries = calendar.filter((c) => {
+      if (!c.anime) return false;
+      const shikiId = Number(c.anime.id);
+      if (shikiId && watchingShikiIds.has(shikiId)) return true;
+
+      const cRus = AnimeLibService.normalizeTitle(c.anime.russian || '').toLowerCase();
+      const cEng = AnimeLibService.normalizeTitle(c.anime.name || '').toLowerCase();
+
+      for (const kw of watchingTitleKeywords) {
+        if (!kw || kw.length < 3) continue;
+        if ((cRus && (cRus.includes(kw) || kw.includes(cRus))) || (cEng && (cEng.includes(kw) || kw.includes(cEng)))) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (matchedEntries.length === 0) {
+      const totalWatching = watchingDb.length || watchingLib.length;
+      const emptyLines = [
+        '📅 <b>Персональный календарь выхода серий</b>',
+        '━━━━━━━━━━━━━━━━━━━━',
+        `📭 <i>В расписании на ближайшие дни пока нет новых серий для аниме из вашего списка «Смотрю» (${totalWatching} тайтлов).</i>`,
+        '',
+        'Возможные причины:',
+        '• Серии для ваших онгоингов уже вышли, либо',
+        '• Точная дата следующего эпизода ещё не анонсирована телесетью.',
+        '',
+        '💡 <i>Вы можете открыть общее расписание всех релизов сезона:</i>',
+      ];
+
+      const kb = new InlineKeyboard()
+        .text('🌐 Общий календарь всех аниме', 'show_global_calendar')
+        .row()
+        .text('📺 Мой список «Смотрю»', 'list_watching')
+        .text('🔄 Проверить серии', 'check_updates');
+
+      return await ctx.reply(emptyLines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
+    }
+
+    // Sort matched chronologically
+    matchedEntries.sort((a, b) => new Date(a.next_episode_at).getTime() - new Date(b.next_episode_at).getTime());
+
+    const lines = matchedEntries.map((c) => {
       const date = new Date(c.next_episode_at);
       const timeStr = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
       const dayStr = date.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' });
-      return `• <b>${escapeHtml(c.anime.russian || c.anime.name)}</b> — Эпизод <code>#${c.next_episode}</code>\n  ⏰ <i>${dayStr} в ${timeStr}</i>`;
+      const relStr = formatRelativeTime(date);
+      const title = escapeHtml(c.anime.russian || c.anime.name);
+      return `📺 <b>${title}</b>\n  🔢 Серия <code>#${c.next_episode}</code>\n  ⏰ <b>${dayStr} в ${timeStr}</b> (${relStr})`;
     });
 
-    const text = `📅 <b>Ближайшие релизы аниме (Расписание):</b>\n\n${lines.join('\n\n')}`;
-    await ctx.reply(text, { parse_mode: 'HTML' });
+    const text = [
+      '📅 <b>Календарь выхода серий ваших онгоингов:</b>',
+      '<i>(Показывает только тайтлы из вашего списка «Смотрю»)</i>',
+      '━━━━━━━━━━━━━━━━━━━━',
+      lines.join('\n\n'),
+    ].join('\n');
+
+    const kb = new InlineKeyboard()
+      .text('🌐 Общий календарь всех аниме', 'show_global_calendar')
+      .row()
+      .text('🔄 Обновить', 'show_calendar')
+      .text('📺 Мой список', 'list_watching');
+
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
   } catch (err: any) {
     await ctx.reply(`❌ Ошибка загрузки календаря: ${err.message}`);
   }
 }
 
-async function showRandomRecommendation(ctx: Context) {
-  await ctx.reply('🎲 <i>Ищу интересный тайтл для сегодняшнего просмотра...</i>', { parse_mode: 'HTML' });
+const recentlyRecommendedIds = new Set<number>();
+
+async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned' | 'ongoing' = 'all') {
+  let promptText = '🎲 <i>Ищу тайтл для сегодняшнего просмотра...</i>';
+  if (category === 'planned') {
+    promptText = '📌 <i>Выбираю тайтл из вашего списка «В планах» (Shikimori)...</i>';
+  } else if (category === 'ongoing') {
+    promptText = '🔥 <i>Подбираю популярный онгоинг сезона...</i>';
+  }
+
+  await ctx.reply(promptText, { parse_mode: 'HTML' });
+
   try {
-    const anime = await shikimoriService.getRandomPlannedAnime();
-    if (!anime) {
-      return ctx.reply('Не удалось найти подходящий тайтл. Попробуйте позже.');
+    const result = await shikimoriService.getRandomRecommendation(
+      category,
+      Array.from(recentlyRecommendedIds)
+    );
+
+    if (!result || !result.anime) {
+      return ctx.reply('Не удалось найти подходящий тайтл. Попробуйте нажать кнопку ещё раз.');
+    }
+
+    const { anime, source } = result;
+
+    // Track recently shown to prevent repeats (keep last 40)
+    recentlyRecommendedIds.add(Number(anime.id));
+    if (recentlyRecommendedIds.size > 40) {
+      const first = recentlyRecommendedIds.values().next().value;
+      if (first !== undefined) recentlyRecommendedIds.delete(first);
     }
 
     const card = formatAnimeCard({
@@ -640,19 +784,30 @@ async function showRandomRecommendation(ctx: Context) {
       cardStyle: 'full',
     });
 
+    const sourceHeader =
+      source === 'planned'
+        ? '📌 <b>Рекомендация из ваших «В планах» (Shikimori):</b>'
+        : '🔥 <b>Горячий онгоинг сезона:</b>';
+
+    const cleanSearchQuery = encodeURIComponent(anime.russian || anime.name);
     const kb = new InlineKeyboard()
-      .url('📊 Открыть на Shikimori', `https://shikimori.one/animes/${anime.id}`)
+      .url('📊 На Shikimori', `https://shikimori.one/animes/${anime.id}`)
+      .url('🌐 На AnimeLib', `${ANIMELIB_WEB_URL}/ru/anime?q=${cleanSearchQuery}`)
       .row()
-      .text('🎲 Другой вариант', 'random_planned');
+      .text('🎲 Случайное', 'random_planned')
+      .text('📌 Из «В планах»', 'random_from_planned')
+      .text('🔥 Онгоинг', 'random_from_ongoing');
+
+    const fullMessage = `${sourceHeader}\n\n${card}`;
 
     if (anime.poster?.mainUrl) {
       await ctx.replyWithPhoto(anime.poster.mainUrl, {
-        caption: `🎲 <b>Случайная рекомендация:</b>\n\n${card}`,
+        caption: fullMessage,
         parse_mode: 'HTML',
         reply_markup: kb,
       });
     } else {
-      await ctx.reply(`🎲 <b>Случайная рекомендация:</b>\n\n${card}`, {
+      await ctx.reply(fullMessage, {
         parse_mode: 'HTML',
         reply_markup: kb,
       });
@@ -664,28 +819,50 @@ async function showRandomRecommendation(ctx: Context) {
 
 async function showUserProfile(ctx: Context) {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
-  const prefs = dbService.getUserPreferences(userId);
   const profile = await shikimoriService.getUserProfile();
-  const watchingCount = dbService.getAllSyncItems('watching').length;
 
-  let favorites: string[] = [];
-  try {
-    favorites = JSON.parse(prefs.favorite_voiceovers || '[]');
-  } catch {}
+  const allSync = dbService.getAllSyncItems();
+  const watchingCount = allSync.filter((s) => s.status === 'watching').length;
+  const completedCount = allSync.filter((s) => s.status === 'completed').length;
+
+  const shikiStats = profile?.stats?.statuses?.anime || profile?.stats?.full_statuses?.anime || [];
+  const shikiPlanned = shikiStats.find((s: any) => s.grouped_id === 'planned')?.size ?? '—';
+  const shikiCompleted = shikiStats.find((s: any) => s.grouped_id === 'completed')?.size ?? '—';
+  const shikiWatching = shikiStats.find((s: any) => s.grouped_id === 'watching,rewatching' || s.grouped_id === 'watching')?.size ?? 0;
+
+  const animelibUserId = process.env.ANIMELIB_USER_ID || 'Не указан';
+  const shikiNick = profile?.nickname || 'Не привязан';
+  const shikiId = profile?.id ? String(profile.id) : '—';
 
   const lines = [
-    '👤 <b>Ваш персональный профиль:</b>',
-    '',
+    '👤 <b>Карточка профиля & Статистика</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
     `🆔 <b>Telegram ID:</b> <code>${userId}</code>`,
-    profile?.nickname ? `🌐 <b>Shikimori:</b> <code>${profile.nickname}</code> (ID: ${profile.id})` : '🌐 <b>Shikimori:</b> <i>Не привязан (заполните SHIKIMORI_USER_ID)</i>',
-    `📺 <b>Отслеживается тайтлов:</b> <code>${watchingCount}</code>`,
-    `🎙 <b>Любимые озвучки:</b> 🔥 <code>${favorites.join(', ') || 'Все'}</code>`,
-    `🎨 <b>Стиль интерфейса:</b> <code>${prefs.card_style}</code> | <b>Качество:</b> <code>${prefs.preferred_quality}</code>`,
+    `🌐 <b>Shikimori:</b> <code>${shikiNick}</code> (ID: <code>${shikiId}</code>)`,
+    `📚 <b>AnimeLib ID:</b> <code>${animelibUserId}</code>`,
+    '',
+    '📊 <b>Ваша аниме-библиотека:</b>',
+    `  • 📺 <b>Смотрю сейчас:</b> <code>${watchingCount || shikiWatching}</code> тайтлов`,
+    `  • 📌 <b>В планах (Shikimori):</b> <code>${shikiPlanned}</code> тайтлов`,
+    `  • 🏁 <b>Просмотрено:</b> <code>${shikiCompleted || completedCount}</code> аниме`,
+    `  • 💾 <b>В локальной базе:</b> <code>${allSync.length}</code> сохраненных записей`,
+    '',
+    '🔄 <b>Синхронизация аккаунтов:</b>',
+    '  • AnimeLib ➔ SQLite ➔ Shikimori: <b>Активна ✅</b>',
+    '  • Отметка серий прямо в Telegram: <b>Включена ✅</b>',
   ];
 
   const kb = new InlineKeyboard()
-    .text('⚙️ Настроить профиль', 'open_settings')
-    .text('🔄 Проверить серии', 'check_updates');
+    .text('🔄 Синхронизировать', 'check_updates')
+    .text('📺 Мой список', 'list_watching')
+    .row();
+
+  if (profile?.id) {
+    kb.url('📊 Профиль Shikimori', `https://shikimori.one/${profile.nickname || profile.id}`);
+  }
+  if (process.env.ANIMELIB_USER_ID) {
+    kb.url('🌐 Закладки AnimeLib', `${ANIMELIB_WEB_URL}/ru/user/${process.env.ANIMELIB_USER_ID}/bookmarks`);
+  }
 
   await ctx.reply(lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
 }
@@ -712,12 +889,27 @@ bot.callbackQuery('list_watching', async (ctx) => {
 
 bot.callbackQuery('show_calendar', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await showAnimeCalendar(ctx);
+  await showAnimeCalendar(ctx, false);
+});
+
+bot.callbackQuery('show_global_calendar', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showAnimeCalendar(ctx, true);
 });
 
 bot.callbackQuery('random_planned', async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Выбираю тайтл...' });
-  await showRandomRecommendation(ctx);
+  await showRandomRecommendation(ctx, 'all');
+});
+
+bot.callbackQuery('random_from_planned', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Ищу в ваших «В планах»...' });
+  await showRandomRecommendation(ctx, 'planned');
+});
+
+bot.callbackQuery('random_from_ongoing', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Подбираю онгоинг...' });
+  await showRandomRecommendation(ctx, 'ongoing');
 });
 
 bot.callbackQuery('open_settings', async (ctx) => {
