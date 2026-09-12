@@ -4,13 +4,26 @@
 
 ## Что сейчас работает
 
-- AnimeLib bookmarks через рабочий endpoint `https://hapi.hentaicdn.org/api`.
-- Поддержка `Authorization: Bearer ...` и/или Cookie-сессии.
-- SQLite-хранилище с миграциями и сохранением OAuth-токенов.
-- Shikimori OAuth2 с автоматическим refresh и синхронизацией `user_rates`.
-- Telegram bot на базе `grammY`.
-- Локальный Gemini -> GitHub bridge с защитой от секретов и ручным подтверждением.
-- Windows launcher `start.bat` для preflight и мостового сценария.
+- **AnimeLib Bookmarks**: авторизация через `https://hapi.hentaicdn.org/api` (Bearer / Cookie, `Site-Id: 5`), автоматический 45-секундный кеш и SQLite fallback.
+- **Синхронизация статусов с Shikimori**: OAuth2 с автоматическим refresh токенов, двусторонняя сверка `user_rates`, перенос 100% базы.
+- **Полная детализация профиля по категориям**:
+  - 📺 **Смотрю сейчас** (код 21)
+  - 📌 **В планах** (код 22)
+  - 🏁 **Просмотрено** (код 24)
+  - ❤️ **Любимые** (код 25)
+  - 🔁 **Пересматриваю** (код 26)
+  - ⏸️ **Отложено** (код 27)
+  - 🚫 **Брошено** (код 23)
+  - ⚔️ **FATE** (коллекция, код 2280926)
+  - 🚫 **Хентай (код 2643707)** строго изолирован и исключён из всех списков, статистики и рекомендаций.
+- **Журнал фоновых проверок (Check Reports)**:
+  - Логирование каждой автопроверки в таблицу `check_reports` (время, онгоинги, обновления, статус).
+  - Отображение статуса, относительного времени («только что») и обратного отсчёта до следующей проверки прямо в Telegram.
+  - Динамический перезапуск планировщика при смене интервала проверки в настройках.
+- **Telegram Bot**: на базе `grammY` с интерактивными инлайн-кнопками, календарем релизов, умными рекомендациями «Что глянуть?» и персональными настройками озвучек/качества.
+- **REST API & Web Dashboard**: локальный Express-сервер с эндпоинтами `/api/stats`, `/api/library-stats`, `/api/titles`, `/api/check-updates`.
+- **Локальный Gemini -> GitHub bridge**: безопасный мост для взаимодействия с моделью, коммитов и релизов с фильтрацией секретов и ручным `y/N` подтверждением.
+- **Windows Launcher (`start.bat`)**: единый центр управления для запуска, компиляции, обновления репозитория и запуска бота.
 
 ## Технологический стек
 
@@ -151,16 +164,25 @@ start.bat
 
 ## Windows launcher
 
-`start.bat` предоставляет простой интерфейс:
-- `1` — preflight Shikimori + запуск Telegram-бота
-- `2` — запуск Gemini bridge
-- `Q` — выход
+`start.bat` предоставляет удобное интерактивное меню управления окружением:
+- `[1] GIT PULL` — подтянуть обновления из текущей ветки репозитория
+- `[2] BUILD CHECK` — проверка сборки проекта (`pnpm run build`)
+- `[3] RUN ALL` — запуск веб-сервера и API панели (`pnpm run dev`)
+- `[4] RUN BOT` — предстартовая проверка Shikimori и запуск Telegram-бота (`pnpm run bot`)
+- `[5] AI BRIDGE` — запуск Gemini AI Bridge workflow
+- `[6] GIT STATUS` — проверка изменённых локальных файлов
+- `[Q] EXIT` — выход
 
 Launcher печатает ASCII-меню и работает как безопасный контрольный центр для локальной разработки.
 
 ## SQLite и миграции
 
-При старте проект создаёт `local.db` и необходимые таблицы. Для старой базы добавляется миграция `custom_note` в `animelib_sync`.
+При старте проект создаёт `local.db` и необходимые таблицы:
+- `auth_tokens` / `oauth_tokens` — OAuth2-токены Shikimori с автообновлением.
+- `animelib_sync` — локальный кеш тайтлов и отслеживаемых серий.
+- `anime_match_cache` — соответствия названий между AnimeLib и Shikimori.
+- `user_preferences` — настройки бота (интервал проверок, тихие часы, качество видео, любимые озвучки).
+- `check_reports` — журнал каждой фоновой проверки серий со статусом, числом проверенных онгоингов и деталями.
 
 Проверить схему можно так:
 
@@ -178,11 +200,12 @@ pnpm exec tsx -e "import { db } from './src/db/database.ts'; console.log(db.prep
 
 ```json
 {
+  "dev": "tsx server.ts",
+  "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+  "start": "node dist/server.cjs",
+  "lint": "tsc --noEmit",
   "bot": "tsx src/bot/index.ts",
   "server": "tsx server.ts",
-  "dev": "vite",
-  "build": "tsc -b && vite build",
-  "lint": "tsc --noEmit",
   "test:shikimori": "tsx scripts/test-shikimori-rate.ts",
   "ai:bridge": "tsx scripts/ai-bridge.ts"
 }

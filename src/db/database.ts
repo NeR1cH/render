@@ -79,6 +79,8 @@ db.exec('CREATE TABLE IF NOT EXISTS check_reports (' +
   'details_json TEXT' +
 ');');
 
+db.exec('CREATE INDEX IF NOT EXISTS idx_check_reports_timestamp ON check_reports(timestamp DESC);');
+
 export interface CheckReportRecord {
   id: number;
   timestamp: number;
@@ -357,6 +359,15 @@ export const dbService = {
       return row || null;
     } catch {
       return null;
+    }
+  },
+
+  getCheckReportsHistory(limit: number = 10): CheckReportRecord[] {
+    try {
+      const stmt = db.prepare('SELECT * FROM check_reports ORDER BY timestamp DESC LIMIT ?');
+      return stmt.all(limit) as unknown as CheckReportRecord[];
+    } catch {
+      return [];
     }
   },
 };

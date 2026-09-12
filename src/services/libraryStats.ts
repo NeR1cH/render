@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { dbService, CheckReportRecord } from '../db/database.js';
-import { shikimoriService } from './shikimori.js';
-import { animelibService } from './animelib.js';
+import { dbService, CheckReportRecord } from '../db/database';
+import { shikimoriService } from './shikimori';
+import { animelibService } from './animelib';
 
 export interface LibraryCategoryStats {
   // Category counts
