@@ -13,7 +13,7 @@ if (!BOT_TOKEN) {
   console.warn('⚠️ TELEGRAM_BOT_TOKEN is not defined in .env. Bot will not connect to Telegram until token is set.');
 }
 
-export const bot = new Bot(BOT_TOKEN);
+export const bot = new Bot(BOT_TOKEN || '000000000:AAFakeTokenForOfflineMode');
 
 // Top standard popular anime voiceover studios
 export const POPULAR_STUDIOS = [
@@ -156,6 +156,7 @@ export function buildAnimeCardKeyboard(item: {
   shikiId?: number | string;
   title: string;
   currentEpisode?: number;
+  newEpisode?: number;
   quality?: string;
 }): InlineKeyboard {
   const kb = new InlineKeyboard();
@@ -182,11 +183,12 @@ export function buildAnimeCardKeyboard(item: {
   // Row 3: Action Buttons (Progress & Mark Completed)
   if (item.mediaId) {
     kb.row();
-    const nextEp = (item.currentEpisode || 0) + 1;
-    kb.text(`➕ Серия #${nextEp}`, `add_ep:${item.mediaId}:${nextEp}:${item.shikiId || 0}`);
+    const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
+    kb.text(`👁 Отметить серию #${epToMark} просмотренной`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
     if (item.shikiId) {
+      kb.row();
       kb.text('⭐️ Оценить', `rate_menu:${item.shikiId}`);
-      kb.text('✅ Завершить', `mark_completed:${item.mediaId}:${item.shikiId}`);
+      kb.text('🏁 Завершить', `mark_completed:${item.mediaId}:${item.shikiId}`);
     }
   }
 
@@ -205,7 +207,21 @@ export function escapeHtml(str: string): string {
 // Core Check & Sync Logic (with Preferences)
 // ==========================================
 
-export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = true) {
+export interface CheckUpdatesResult {
+  success: boolean;
+  checkedCount: number;
+  updatesCount: number;
+  updatedTitles: Array<{
+    mediaId: number;
+    title: string;
+    rusTitle?: string;
+    newEpisode: number;
+    previousEpisode: number;
+  }>;
+  message?: string;
+}
+
+export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = true): Promise<CheckUpdatesResult> {
   const userId = ctx?.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
   const prefs = dbService.getUserPreferences(userId);
 
@@ -236,6 +252,14 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
     }
   };
 
+  const updatedTitles: Array<{
+    mediaId: number;
+    title: string;
+    rusTitle?: string;
+    newEpisode: number;
+    previousEpisode: number;
+  }> = [];
+
   try {
     await send('⏳ <i>Проверяю ваши закладки AnimeLib и новые серии...</i>', {
       parse_mode: 'HTML',
@@ -250,7 +274,13 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
           { parse_mode: 'HTML' }
         );
       }
-      return;
+      return {
+        success: true,
+        checkedCount: 0,
+        updatesCount: 0,
+        updatedTitles: [],
+        message: 'В списке «Смотрю» пока нет тайтлов или требуется обновление cookie',
+      };
     }
 
     let updatesCount = 0;
@@ -293,22 +323,46 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
           shikiAnime = await shikimoriService.getAnimeById(shikiId);
         }
 
+        // Защита от спама при первичном добавлении / инициализации:
+        // Если запись только создана или lastTracked === 0, не спамим уведомлениями,
+        // а фиксируем текущую вышедшую серию в базе для отслеживания будущих релизов.
+        if (lastTracked === 0) {
+          if (latestEpisode > 0) {
+            dbService.updateTrackedEpisode(item.media_id, latestEpisode);
+          } else {
+            dbService.updateLastChecked(item.media_id);
+          }
+          continue;
+        }
+
         // Has a new episode been released?
         const hasNewEpisode = latestEpisode > lastTracked;
 
         if (hasNewEpisode) {
-          // If notify_only_favorites is turned ON, verify favorite voiceover exists
+          // If notify_only_favorites is turned ON, verify favorite voiceover exists for the latest episode
           if (prefs.notify_only_favorites) {
-            const matchesFavorite = mediaEpisodes.voiceovers.some((vo) =>
+            const targetVoiceovers = mediaEpisodes.latestVoiceovers?.length
+              ? mediaEpisodes.latestVoiceovers
+              : mediaEpisodes.voiceovers;
+
+            const matchesFavorite = targetVoiceovers.some((vo) =>
               favoriteVoiceovers.some((fav) => fav.toLowerCase() === vo.toLowerCase())
             );
             if (!matchesFavorite) {
+              dbService.updateLastChecked(item.media_id);
               // Skip notification until favorite studio is available
               continue;
             }
           }
 
           updatesCount++;
+          updatedTitles.push({
+            mediaId: item.media_id,
+            title: item.name,
+            rusTitle: item.rus_name || shikiAnime?.russian,
+            newEpisode: latestEpisode,
+            previousEpisode: lastTracked,
+          });
 
           const cardText = formatAnimeCard({
             title: item.name,
@@ -317,7 +371,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
             newEpisode: latestEpisode,
             score: shikiAnime?.score,
             genres: shikiAnime?.genres?.map((g) => g.russian || g.name),
-            voiceovers: mediaEpisodes.voiceovers,
+            voiceovers: mediaEpisodes.latestVoiceovers?.length ? mediaEpisodes.latestVoiceovers : mediaEpisodes.voiceovers,
             favoriteVoiceovers,
             customNote: stored?.custom_note || undefined,
             description: shikiAnime?.description,
@@ -331,6 +385,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
             shikiId: shikiId || undefined,
             title: item.rus_name || item.name,
             currentEpisode: lastTracked,
+            newEpisode: latestEpisode,
             quality: prefs.preferred_quality || '1080p',
           });
 
@@ -356,6 +411,8 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
           // Save tracked episode in SQLite
           dbService.updateTrackedEpisode(item.media_id, latestEpisode);
+        } else {
+          dbService.updateLastChecked(item.media_id);
         }
       } catch (err) {
         console.error(`Error processing title "${item.name}":`, err);
@@ -371,11 +428,26 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         }
       );
     }
+
+    return {
+      success: true,
+      checkedCount: watchingList.length,
+      updatesCount,
+      updatedTitles,
+      message: updatesCount > 0 ? `Найдено новых серий: ${updatesCount}` : 'Свежих релизов пока нет',
+    };
   } catch (err: any) {
     console.error('Check anime updates error:', err);
     await send(`❌ <b>Ошибка при проверке:</b>\n<code>${escapeHtml(err.message)}</code>`, {
       parse_mode: 'HTML',
     });
+    return {
+      success: false,
+      checkedCount: 0,
+      updatesCount: 0,
+      updatedTitles: [],
+      message: err.message || 'Ошибка проверки обновлений',
+    };
   }
 }
 
@@ -678,16 +750,27 @@ bot.callbackQuery(/^set_rate:(\d+):(\d+)$/, async (ctx) => {
 
 bot.callbackQuery('cancel_rate', (ctx) => ctx.deleteMessage());
 
-// Increment Episode (+1 series) in one click
-bot.callbackQuery(/^add_ep:(\d+):(\d+):(\d+)$/, async (ctx) => {
-  const mediaId = parseInt(ctx.match[1], 10);
-  const episode = parseInt(ctx.match[2], 10);
-  const shikiId = parseInt(ctx.match[3], 10);
+bot.catch((err) => {
+  console.error('❌ [GrammY Unhandled Error]:', err.error || err);
+});
 
-  await ctx.answerCallbackQuery({ text: `Отмечаю серию #${episode}...` });
+async function handleWatchEpisode(ctx: Context, mediaId: number, episode: number, initialShikiId: number = 0) {
+  let shikiId = initialShikiId;
 
+  if (!shikiId) {
+    const syncItem = dbService.getSyncItemByMediaId(mediaId);
+    if (syncItem?.shiki_id) {
+      shikiId = syncItem.shiki_id;
+    }
+  }
+
+  // 1. Quick user feedback
+  await ctx.answerCallbackQuery({ text: `Серия #${episode} отмечена!` });
+
+  // 2. Update local SQLite progress
   dbService.updateTrackedEpisode(mediaId, episode);
 
+  // 3. Upsert / update user rate in Shikimori if shikiId exists
   if (shikiId > 0) {
     try {
       await shikimoriService.updateUserRate({
@@ -695,15 +778,69 @@ bot.callbackQuery(/^add_ep:(\d+):(\d+):(\d+)$/, async (ctx) => {
         status: 'watching',
         episodes: episode,
       });
-    } catch (e) {
-      console.warn('Could not sync episode count with Shikimori:', e);
+    } catch (e: any) {
+      console.warn('[Telegram Bot] Could not sync user_rate with Shikimori:', e?.message || e);
     }
   }
 
-  await ctx.reply(`✅ <b>Прогресс обновлен:</b> Серия <code>#${episode}</code> отмечена!`, {
-    parse_mode: 'HTML',
-  });
+  // 4. Update message inline (replacing action button with "Просмотрено" status)
+  const updatedKb = new InlineKeyboard();
+  const animelibUrl = `https://animelib.me/ru/anime/${mediaId}`;
+  updatedKb.url('🌐 AnimeLib', animelibUrl);
+  if (shikiId > 0) {
+    updatedKb.url('📊 Shikimori', `https://shikimori.one/animes/${shikiId}`);
+    updatedKb.row();
+    updatedKb.text('⭐️ Оценить', `rate_menu:${shikiId}`);
+    updatedKb.text('🏁 Завершить', `mark_completed:${mediaId}:${shikiId}`);
+  }
+  updatedKb.row().text(`✅ Просмотрено (серия #${episode})`, 'noop');
+
+  try {
+    const originalText = ctx.msg?.text || ctx.msg?.caption || '';
+    const note = `\n\n✅ <b>Просмотрено:</b> Серия <code>#${episode}</code> успешно отмечена!`;
+
+    if (ctx.msg?.caption !== undefined) {
+      await ctx.editMessageCaption({
+        caption: originalText + note,
+        parse_mode: 'HTML',
+        reply_markup: updatedKb,
+      });
+    } else if (ctx.msg?.text !== undefined) {
+      await ctx.editMessageText(originalText + note, {
+        parse_mode: 'HTML',
+        reply_markup: updatedKb,
+      });
+    } else {
+      await ctx.editMessageReplyMarkup({ reply_markup: updatedKb });
+    }
+  } catch {
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: updatedKb });
+    } catch {
+      await ctx.reply(`✅ <b>Прогресс обновлен:</b> Серия <code>#${episode}</code> отмечена!`, {
+        parse_mode: 'HTML',
+      });
+    }
+  }
+}
+
+// Watch button callback (e.g. watch_1234_13.5 or watch_1234_14_5678)
+bot.callbackQuery(/^(?:watch_|watch:)(\d+)[_:]([\d.]+)(?:[_:](\d+))?$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const episode = parseFloat(ctx.match[2]);
+  const shikiId = ctx.match[3] ? parseInt(ctx.match[3], 10) : 0;
+  await handleWatchEpisode(ctx, mediaId, episode, shikiId);
 });
+
+// Increment Episode (+1 series) in one click
+bot.callbackQuery(/^add_ep:(\d+):([\d.]+):(\d+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const episode = parseFloat(ctx.match[2]);
+  const shikiId = parseInt(ctx.match[3], 10);
+  await handleWatchEpisode(ctx, mediaId, episode, shikiId);
+});
+
+bot.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery({ text: 'Серия уже отмечена как просмотренная!' }));
 
 // Mark Completed
 bot.callbackQuery(/^mark_completed:(\d+):(\d+)$/, async (ctx) => {
@@ -875,12 +1012,16 @@ export function startScheduler(intervalMinutes: number = 30) {
 // ==========================================
 // Bot Launch
 // ==========================================
+let isBotRunning = false;
+
 export async function startBot() {
+  if (isBotRunning) return;
   if (!BOT_TOKEN) {
     console.warn('⚠️ Telegram bot token is missing. Skipping bot.start(). Set TELEGRAM_BOT_TOKEN in .env to run.');
     return;
   }
 
+  isBotRunning = true;
   console.log('🤖 Starting Personalized Anime Tracker Bot with grammY...');
   startScheduler(30);
 
@@ -888,6 +1029,9 @@ export async function startBot() {
     onStart: (botInfo) => {
       console.log(`✅ Telegram bot @${botInfo.username} successfully started!`);
     },
+  }).catch((err) => {
+    console.error('❌ [Telegram bot.start error]:', err);
+    isBotRunning = false;
   });
 }
 

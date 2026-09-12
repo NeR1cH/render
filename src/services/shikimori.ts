@@ -107,6 +107,14 @@ export type ShikimoriStatus = 'planned' | 'watching' | 'completed' | 'on_hold' |
 
 export function mapAnimeLibStatusToShikimori(statusId: number): ShikimoriStatus {
   switch (statusId) {
+    case 21: return 'watching';
+    case 22: return 'planned';
+    case 23: return 'dropped';
+    case 24: return 'completed';
+    case 25: return 'completed'; // Любимое
+    case 26: return 'watching';  // Пересматриваю
+    case 27: return 'on_hold';
+    // Fallback для альтернативных/устаревших кодов
     case 1: return 'planned';
     case 2: return 'watching';
     case 3: return 'completed';
@@ -126,8 +134,14 @@ export interface UserRatePayload {
 }
 
 export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
+  const safePayload: UserRatePayload = {
+    ...payload,
+    // Shikimori REST API v2 принимает для episodes строго Integer
+    episodes: payload.episodes !== undefined ? Math.floor(Number(payload.episodes) || 0) : undefined,
+  };
+
   try {
-    const response = await shikimoriClient.post('/api/v2/user_rates', { user_rate: payload });
+    const response = await shikimoriClient.post('/api/v2/user_rates', { user_rate: safePayload });
     return response.data;
   } catch (error: any) {
     if (error.response?.status !== 422) {
@@ -136,8 +150,8 @@ export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
 
     const ratesResponse = await shikimoriClient.get('/api/v2/user_rates', {
       params: {
-        user_id: payload.user_id,
-        target_id: payload.target_id,
+        user_id: safePayload.user_id,
+        target_id: safePayload.target_id,
         target_type: 'Anime',
       },
     });
@@ -148,9 +162,9 @@ export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
 
     const patchResponse = await shikimoriClient.patch(`/api/v2/user_rates/${existingRate.id}`, {
       user_rate: {
-        status: payload.status,
-        episodes: payload.episodes,
-        score: payload.score,
+        status: safePayload.status,
+        episodes: safePayload.episodes,
+        score: safePayload.score,
       },
     });
     return patchResponse.data;
@@ -305,7 +319,7 @@ export class ShikimoriService {
       const existingId = existingList[0].id;
       const patchData: any = {};
       if (rate.status) patchData.status = rate.status;
-      if (rate.episodes !== undefined) patchData.episodes = rate.episodes;
+      if (rate.episodes !== undefined) patchData.episodes = Math.floor(Number(rate.episodes) || 0);
       if (rate.score !== undefined) patchData.score = rate.score;
 
       const res = await this.client.patch(`/api/v2/user_rates/${existingId}`, { user_rate: patchData }, { headers });
@@ -316,7 +330,7 @@ export class ShikimoriService {
         target_id: rate.target_id,
         target_type: 'Anime',
         status: rate.status || 'watching',
-        episodes: rate.episodes || 0,
+        episodes: rate.episodes !== undefined ? Math.floor(Number(rate.episodes) || 0) : 0,
         score: rate.score || 0,
       };
 

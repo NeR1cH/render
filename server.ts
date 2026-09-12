@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
+import { checkAnimeUpdates } from './src/bot/index';
+import { dbService } from './src/db/database';
 
 interface ShikiMatch {
   id: number;
@@ -224,6 +226,87 @@ async function startServer() {
   app.use(express.json({ limit: '20mb' }));
 
   // API Routes
+  app.post('/api/check-updates', async (req, res) => {
+    try {
+      const result = await checkAnimeUpdates(undefined, false);
+      if (!result.success) {
+        return res.status(502).json({
+          success: false,
+          error: result.message || 'Ошибка внешних сервисов (AnimeLib / Shikimori)',
+          checkedCount: result.checkedCount,
+          updatesCount: result.updatesCount,
+          updatedTitles: result.updatedTitles,
+        });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error('[API /api/check-updates Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Внутренняя ошибка сервера при проверке обновлений',
+      });
+    }
+  });
+
+  app.get('/api/check-updates', async (req, res) => {
+    try {
+      const result = await checkAnimeUpdates(undefined, false);
+      if (!result.success) {
+        return res.status(502).json({
+          success: false,
+          error: result.message || 'Ошибка внешних сервисов (AnimeLib / Shikimori)',
+          checkedCount: result.checkedCount,
+          updatesCount: result.updatesCount,
+          updatedTitles: result.updatedTitles,
+        });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error('[API /api/check-updates Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Внутренняя ошибка сервера при проверке обновлений',
+      });
+    }
+  });
+
+  app.post('/api/sync', async (req, res) => {
+    try {
+      const result = await checkAnimeUpdates(undefined, false);
+      if (!result.success) {
+        return res.status(502).json({
+          success: false,
+          error: result.message || 'Ошибка внешних сервисов при синхронизации',
+          details: result,
+        });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error('[API /api/sync Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Внутренняя ошибка сервера при синхронизации',
+      });
+    }
+  });
+
+  app.get('/api/sync-records', (req, res) => {
+    try {
+      const records = dbService.getAllSyncItems();
+      res.json({
+        success: true,
+        count: records.length,
+        records,
+      });
+    } catch (err: any) {
+      console.error('[API /api/sync-records Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Не удалось загрузить записи из локальной базы данных',
+      });
+    }
+  });
+
   app.get('/api/stats', (req, res) => {
     const total = titlesList.length;
     const migrated = titlesList.filter((t) => t.is_migrated).length;

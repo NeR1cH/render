@@ -103,8 +103,8 @@ export function App() {
           <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-2 -mb-px">
             {[
               { id: 'overview', label: 'Обзор & Статистика', icon: Compass },
-              { id: 'titles', label: 'База закладок (422)', icon: Layers },
-              { id: 'resolver', label: 'Разрешение конфликтов (5)', icon: AlertTriangle, badge: stats?.ambiguous },
+              { id: 'titles', label: `База закладок (${stats?.total ?? 422})`, icon: Layers },
+              { id: 'resolver', label: `Разрешение конфликтов (${stats?.ambiguous ?? 0})`, icon: AlertTriangle, badge: stats?.ambiguous },
               { id: 'simulate', label: 'Симулятор & Запуск', icon: PlayCircle },
               { id: 'inspect', label: 'Инспектор .json/.har', icon: FileText },
             ].map((tab) => {

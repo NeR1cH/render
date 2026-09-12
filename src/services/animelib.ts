@@ -15,6 +15,28 @@ export interface AnimeLibBookmarkItem {
 export interface AnimeLibEpisodeInfo {
   latestEpisode: number;
   voiceovers: string[];
+  latestVoiceovers: string[];
+}
+
+export function parseEpisodeNumber(val: any): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+
+  const str = String(val).trim().toLowerCase();
+  if (!str) return 0;
+
+  // Если в строке присутствуют префиксы/маркеры спешлов, OVA или экстра-эпизодов,
+  // не парсим их как обычную серию, чтобы они не перетирали номер основной серии
+  if (/^(sp|ova|spec|фильм|film|movie|extra|recap)/i.test(str) || /\b(sp|ova|spec)\b/i.test(str)) {
+    return 0;
+  }
+
+  // Извлекаем число (включая дробные серии, например 13.5)
+  const match = str.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+
+  const num = parseFloat(match[1]);
+  return Number.isFinite(num) ? num : 0;
 }
 
 export class AnimeLibService {
@@ -83,6 +105,7 @@ export class AnimeLibService {
 
     const transformItems = (rawItems: any[]): AnimeLibBookmarkItem[] => {
       const result: AnimeLibBookmarkItem[] = [];
+      const toSync: Array<any> = [];
 
       for (const item of rawItems) {
         const media = item.media || item.anime || item;
@@ -92,29 +115,43 @@ export class AnimeLibService {
           continue;
         }
 
+        const rawProgress =
+          item.meta?.item_number ??
+          item.item?.number ??
+          item.item_number ??
+          item.current_item_number;
+
+        const rawLastEp =
+          media.metadata?.last_item?.number ??
+          media.metadata?.last_item?.item_number ??
+          media.items_count?.uploaded ??
+          media.last_item_number;
+
         const entry: AnimeLibBookmarkItem = {
           media_id: mediaId,
           slug_url: media.slug_url || media.slug || String(mediaId),
           name: media.name || media.eng_name || media.title || '',
           rus_name: media.rus_name || media.russian || '',
-          current_progress_number: item.current_item_number || item.item_number || 0,
-          last_item_number: media.last_item_number || 0,
+          current_progress_number: parseEpisodeNumber(rawProgress),
+          last_item_number: parseEpisodeNumber(rawLastEp),
           poster: media.cover?.default || media.poster,
         };
 
-        try {
-          dbService.upsertSyncItem({
-            media_id: entry.media_id,
-            title: entry.name,
-            rus_title: entry.rus_name,
-            status: 'watching',
-            last_tracked_episode: entry.current_progress_number || 0,
-          });
-        } catch (dbError: any) {
-          console.warn('[AnimeLib] Could not sync bookmark to local DB:', dbError?.message);
-        }
+        toSync.push({
+          media_id: entry.media_id,
+          title: entry.name,
+          rus_title: entry.rus_name,
+          status: 'watching',
+          last_tracked_episode: entry.current_progress_number || 0,
+        });
 
         result.push(entry);
+      }
+
+      try {
+        dbService.batchUpsertSyncItems(toSync);
+      } catch (dbError: any) {
+        console.warn('[AnimeLib] Could not batch sync bookmarks to local DB:', dbError?.message);
       }
 
       return result;
@@ -177,14 +214,27 @@ export class AnimeLibService {
 
       let maxEp = 0;
       const studiosSet = new Set<string>();
+      const latestStudiosSet = new Set<string>();
 
       for (const ep of episodesData) {
-        const num = parseFloat(ep.number || ep.item_number || '0');
+        const num = parseEpisodeNumber(ep.number ?? ep.item_number);
         if (num > maxEp) maxEp = num;
+      }
+
+      for (const ep of episodesData) {
+        const num = parseEpisodeNumber(ep.number ?? ep.item_number);
 
         if (Array.isArray(ep.players)) {
           for (const pl of ep.players) {
-            if (pl.team?.name) studiosSet.add(pl.team.name.trim());
+            // Отсекаем субтитры (translation_type.id === 1) и пустые имена
+            const isSub = pl.translation_type?.id === 1;
+            const teamName = pl.team?.name?.trim();
+            if (teamName && !isSub) {
+              studiosSet.add(teamName);
+              if (num === maxEp) {
+                latestStudiosSet.add(teamName);
+              }
+            }
           }
         }
       }
@@ -192,6 +242,7 @@ export class AnimeLibService {
       return {
         latestEpisode: maxEp,
         voiceovers: Array.from(studiosSet),
+        latestVoiceovers: Array.from(latestStudiosSet),
       };
     } catch {
       // Fallback: Web Scraping через cheerio
@@ -200,18 +251,20 @@ export class AnimeLibService {
         const pageRes = await this.client.get(targetUrl, { headers });
         const $ = cheerio.load(pageRes.data);
 
-        const studios: string[] = [];
+        const studiosSet = new Set<string>();
         $('.team-item, .voiceover-item, [data-studio]').each((_, el) => {
           const name = $(el).text().trim();
-          if (name) studios.push(name);
+          if (name) studiosSet.add(name);
         });
 
+        const list = Array.from(studiosSet);
         return {
           latestEpisode: 0,
-          voiceovers: studios,
+          voiceovers: list,
+          latestVoiceovers: list,
         };
       } catch (scrapeErr: any) {
-        return { latestEpisode: 0, voiceovers: [] };
+        return { latestEpisode: 0, voiceovers: [], latestVoiceovers: [] };
       }
     }
   }

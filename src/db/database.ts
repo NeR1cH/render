@@ -117,6 +117,18 @@ export function getTokens(service: string): OAuthTokenRecord | undefined {
 }
 
 export const dbService = {
+  transaction<T>(fn: () => T): T {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = fn();
+      db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  },
+
   saveAuthTokens(service: string, tokens: { access_token: string; refresh_token?: string; user_id?: string; expires_at?: number }) {
     const query = 'INSERT INTO auth_tokens (service, access_token, refresh_token, user_id, expires_at, updated_at) ' +
       'VALUES (?, ?, ?, ?, ?, ?) ' +
@@ -173,7 +185,7 @@ export const dbService = {
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
       'status = excluded.status, ' +
-      'last_tracked_episode = COALESCE(excluded.last_tracked_episode, animelib_sync.last_tracked_episode), ' +
+      'last_tracked_episode = MAX(COALESCE(animelib_sync.last_tracked_episode, 0), COALESCE(excluded.last_tracked_episode, 0)), ' +
       'preferred_voiceover = COALESCE(excluded.preferred_voiceover, animelib_sync.preferred_voiceover), ' +
       'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
@@ -194,9 +206,49 @@ export const dbService = {
     );
   },
 
+  batchUpsertSyncItems(items: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }>) {
+    if (!items || items.length === 0) return;
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(media_id) DO UPDATE SET ' +
+      'title = excluded.title, ' +
+      'rus_title = excluded.rus_title, ' +
+      'status = excluded.status, ' +
+      'last_tracked_episode = MAX(COALESCE(animelib_sync.last_tracked_episode, 0), COALESCE(excluded.last_tracked_episode, 0)), ' +
+      'preferred_voiceover = COALESCE(excluded.preferred_voiceover, animelib_sync.preferred_voiceover), ' +
+      'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
+      'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
+      'custom_note = COALESCE(excluded.custom_note, animelib_sync.custom_note), ' +
+      'last_checked_at = excluded.last_checked_at';
+
+    this.transaction(() => {
+      const stmt = db.prepare(query);
+      const now = Date.now();
+      for (const item of items) {
+        stmt.run(
+          item.media_id,
+          item.title,
+          item.rus_title || null,
+          item.status || null,
+          item.last_tracked_episode || 0,
+          item.preferred_voiceover || null,
+          item.shiki_id || null,
+          item.shiki_synced || 0,
+          item.custom_note || null,
+          now
+        );
+      }
+    });
+  },
+
   updateTrackedEpisode(mediaId: number, episode: number) {
-    const stmt = db.prepare('UPDATE animelib_sync SET last_tracked_episode = ?, last_checked_at = ? WHERE media_id = ?');
+    const stmt = db.prepare('UPDATE animelib_sync SET last_tracked_episode = MAX(COALESCE(last_tracked_episode, 0), ?), last_checked_at = ? WHERE media_id = ?');
     stmt.run(episode, Date.now(), mediaId);
+  },
+
+  updateLastChecked(mediaId: number) {
+    const stmt = db.prepare('UPDATE animelib_sync SET last_checked_at = ? WHERE media_id = ?');
+    stmt.run(Date.now(), mediaId);
   },
 
   markShikiSynced(mediaId: number, shikiId: number) {
