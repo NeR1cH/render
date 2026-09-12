@@ -9,7 +9,10 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview",
     "server": "tsx server.ts",
+    "backend": "tsx server.ts",
     "bot": "tsx src/bot/index.ts",
+    "bot:check": "tsx scripts/test-shikimori-rate.ts",
+    "bridge": "tsx scripts/ai-bridge.ts",
     "test:shikimori": "tsx scripts/test-shikimori-rate.ts",
     "ai:bridge": "tsx scripts/ai-bridge.ts"
   },
