@@ -52,14 +52,14 @@ echo       [ GIT PULL ]
 echo       Подтягиваем свежие обновления из ветки feat/ai-github-bridge...
 echo       ------------------------------------------------------------------
 call git pull origin feat/ai-github-bridge
-set "PULL_CODE=!errorlevel!"
+set "PULL_CODE=%errorlevel%"
 echo.
-if "!PULL_CODE!"=="0" (
+if "%PULL_CODE%"=="0" (
     color 0A
     echo       [OK] Обновления успешно подтянуты!
 ) else (
     color 4F
-    echo       [ERROR] Ошибка при выполнении git pull (код !PULL_CODE!).
+    echo       [ERROR] Ошибка при выполнении git pull - код: %PULL_CODE%
 )
 echo.
 pause
@@ -72,14 +72,14 @@ echo       [ BUILD CHECK ]
 echo       Запуск сборки TypeScript и Vite для проверки компиляции...
 echo       ------------------------------------------------------------------
 call !PM! run build
-set "BUILD_CODE=!errorlevel!"
+set "BUILD_CODE=%errorlevel%"
 echo.
-if "!BUILD_CODE!"=="0" (
+if "%BUILD_CODE%"=="0" (
     color 0A
     echo       [OK] Сборка прошла успешно! Ошибок компиляции нет.
 ) else (
     color 4F
-    echo       [ERROR] Сборка завершилась с ошибкой (код !BUILD_CODE!).
+    echo       [ERROR] Сборка завершилась с ошибкой - код: %BUILD_CODE%
 )
 echo.
 pause
@@ -92,9 +92,10 @@ echo       [ STARTING FULL APP ]
 echo       Запуск сервера, веб-интерфейса и фонового планировщика...
 echo       ------------------------------------------------------------------
 call !PM! run dev
-set "DEV_CODE=!errorlevel!"
+set "DEV_CODE=%errorlevel%"
 echo.
-echo       Сервер остановлен с кодом !DEV_CODE!.
+echo       Сервер остановлен с кодом: %DEV_CODE%
+echo.
 pause
 goto :menu
 
@@ -105,12 +106,13 @@ echo       [ STARTING BOT ]
 echo       Шаг 1/2: Проверка связи с Shikimori...
 echo       ------------------------------------------------------------------
 call !PM! run bot:check
-set "CHECK_EXIT_CODE=!errorlevel!"
-if not "!CHECK_EXIT_CODE!"=="0" (
+set "CHECK_EXIT_CODE=%errorlevel%"
+if not "%CHECK_EXIT_CODE%"=="0" (
     color 4F
     echo.
-    echo       [FAILED] Проверка Shikimori вернула код !CHECK_EXIT_CODE!.
+    echo       [FAILED] Проверка Shikimori вернула код: %CHECK_EXIT_CODE%
     echo       Запуск бота отменен.
+    echo.
     pause
     goto :menu
 )
@@ -122,9 +124,10 @@ echo.
 echo       Шаг 2/2: Запуск Telegram-бота...
 echo       ------------------------------------------------------------------
 call !PM! run bot
-set "BOT_EXIT_CODE=!errorlevel!"
+set "BOT_EXIT_CODE=%errorlevel%"
 echo.
-echo       Бот остановлен с кодом !BOT_EXIT_CODE!.
+echo       Бот остановлен с кодом: %BOT_EXIT_CODE%
+echo.
 pause
 goto :menu
 
@@ -142,14 +145,14 @@ echo.
 echo       Отправка запроса в Gemini...
 echo       ------------------------------------------------------------------
 call !PM! run bridge "!AI_TASK!"
-set "BRIDGE_EXIT_CODE=!errorlevel!"
+set "BRIDGE_EXIT_CODE=%errorlevel%"
 echo.
-if "!BRIDGE_EXIT_CODE!"=="0" (
+if "%BRIDGE_EXIT_CODE%"=="0" (
     color 0A
     echo       [OK] AI Bridge успешно выполнен.
 ) else (
     color 4F
-    echo       [ERROR] AI Bridge завершился с кодом !BRIDGE_EXIT_CODE!.
+    echo       [ERROR] AI Bridge завершился с кодом: %BRIDGE_EXIT_CODE%
 )
 echo.
 pause
