@@ -44,7 +44,7 @@ echo       [ BOT STARTUP ]
 echo.
 echo       STEP 1/2  Checking Shikimori OAuth and user_rate access...
 echo       ------------------------------------------------------------------
-call pnpm test:shikimori
+call npm run test:shikimori
 set "TEST_EXIT_CODE=!errorlevel!"
 
 if not "!TEST_EXIT_CODE!"=="0" (
@@ -65,7 +65,7 @@ echo       [OK] Shikimori API is ready.
 echo.
 echo       STEP 2/2  Starting Telegram bot...
 echo       ------------------------------------------------------------------
-call pnpm bot
+call npm run bot
 set "BOT_EXIT_CODE=!errorlevel!"
 echo.
 echo       Bot process ended with code !BOT_EXIT_CODE!.
@@ -91,7 +91,7 @@ if not defined AI_TASK goto :menu
 echo.
 echo       Sending request to Gemini...
 echo       ------------------------------------------------------------------
-call pnpm ai:bridge "!AI_TASK!"
+call npm run ai:bridge "!AI_TASK!"
 set "BRIDGE_EXIT_CODE=!errorlevel!"
 echo.
 if "!BRIDGE_EXIT_CODE!"=="0" (
