@@ -260,8 +260,17 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         const mediaEpisodes = await animelibService.getMediaEpisodes(item.media_id, item.slug_url);
         const stored = dbService.getSyncItemByMediaId(item.media_id);
 
-        const lastTracked = stored?.last_tracked_episode || item.current_progress_number || 0;
-        const latestEpisode = mediaEpisodes.latestEpisode || item.last_item_number;
+        const lastTracked = stored?.last_tracked_episode ?? item.current_progress_number ?? 0;
+        const latestEpisode = Math.max(mediaEpisodes.latestEpisode || 0, item.last_item_number || 0);
+
+        // Combine voiceovers from bookmark metadata and episodes endpoint
+        const allVoiceovers = Array.from(
+          new Set([...(item.voiceovers || []), ...(mediaEpisodes.voiceovers || [])])
+        );
+
+        console.log(
+          `[Check] "${item.rus_name || item.name}" (ID: ${item.media_id}): DB tracked=${lastTracked}, site latest=${latestEpisode}, new=${latestEpisode > lastTracked}, studios=[${allVoiceovers.join(', ')}]`
+        );
 
         // Try to match or retrieve Shikimori details
         let shikiId = stored?.shiki_id;
@@ -297,13 +306,15 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         const hasNewEpisode = latestEpisode > lastTracked;
 
         if (hasNewEpisode) {
-          // If notify_only_favorites is turned ON, verify favorite voiceover exists
-          if (prefs.notify_only_favorites) {
-            const matchesFavorite = mediaEpisodes.voiceovers.some((vo) =>
+          // If notify_only_favorites is turned ON and studios were detected, verify favorite voiceover exists
+          if (prefs.notify_only_favorites && allVoiceovers.length > 0) {
+            const matchesFavorite = allVoiceovers.some((vo) =>
               favoriteVoiceovers.some((fav) => fav.toLowerCase() === vo.toLowerCase())
             );
             if (!matchesFavorite) {
-              // Skip notification until favorite studio is available
+              console.log(
+                `[Check] "${item.rus_name || item.name}": new ep ${latestEpisode} ready, but favorite studios (${favoriteVoiceovers.join(', ')}) not found in [${allVoiceovers.join(', ')}]`
+              );
               continue;
             }
           }
@@ -317,7 +328,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
             newEpisode: latestEpisode,
             score: shikiAnime?.score,
             genres: shikiAnime?.genres?.map((g) => g.russian || g.name),
-            voiceovers: mediaEpisodes.voiceovers,
+            voiceovers: allVoiceovers,
             favoriteVoiceovers,
             customNote: stored?.custom_note || undefined,
             description: shikiAnime?.description,

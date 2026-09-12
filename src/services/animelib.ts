@@ -10,6 +10,7 @@ export interface AnimeLibBookmarkItem {
   current_progress_number?: number;
   last_item_number?: number;
   poster?: string;
+  voiceovers?: string[];
 }
 
 export interface AnimeLibEpisodeInfo {
@@ -92,14 +93,48 @@ export class AnimeLibService {
           continue;
         }
 
+        // 1. Watched Progress: AnimeLib stores in item.meta?.item_number or item.item?.number
+        const rawProgress =
+          item.meta?.item_number ??
+          item.item?.number ??
+          item.current_progress_number ??
+          item.current_item_number ??
+          item.item_number ??
+          0;
+        const currentProgress = parseFloat(String(rawProgress)) || 0;
+
+        // 2. Latest Released Episode: media.metadata?.last_item?.number or media.items_count?.uploaded
+        const lastItemMeta = media.metadata?.last_item;
+        const rawLatest =
+          lastItemMeta?.number ??
+          media.items_count?.uploaded ??
+          media.last_item_number ??
+          media.items_count?.total ??
+          0;
+        const lastEpisode = parseFloat(String(rawLatest)) || 0;
+
+        // 3. Voiceover Teams: embedded inside lastItemMeta.players
+        const voiceoverStudios: string[] = [];
+        if (Array.isArray(lastItemMeta?.players)) {
+          for (const pl of lastItemMeta.players) {
+            if (pl.team?.name) {
+              const teamName = pl.team.name.trim();
+              if (!voiceoverStudios.includes(teamName)) {
+                voiceoverStudios.push(teamName);
+              }
+            }
+          }
+        }
+
         const entry: AnimeLibBookmarkItem = {
           media_id: mediaId,
           slug_url: media.slug_url || media.slug || String(mediaId),
           name: media.name || media.eng_name || media.title || '',
           rus_name: media.rus_name || media.russian || '',
-          current_progress_number: item.current_item_number || item.item_number || 0,
-          last_item_number: media.last_item_number || 0,
+          current_progress_number: currentProgress,
+          last_item_number: lastEpisode,
           poster: media.cover?.default || media.poster,
+          voiceovers: voiceoverStudios,
         };
 
         try {

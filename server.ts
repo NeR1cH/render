@@ -3,6 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
+import { dbService } from './src/db/database';
+import { animelibService } from './src/services/animelib';
 
 interface ShikiMatch {
   id: number;
@@ -479,6 +481,222 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(400).json({ error: 'Failed to parse JSON file: ' + err.message });
+    }
+  });
+
+  // --- SYNC & BOT BRIDGE ENDPOINTS ---
+  app.get('/api/bot/status', (req, res) => {
+    const prefs = dbService.getUserPreferences(process.env.TELEGRAM_DEFAULT_CHAT_ID || 'default_user');
+    res.json({
+      configured: {
+        telegramBotToken: !!process.env.TELEGRAM_BOT_TOKEN,
+        telegramChatId: !!(process.env.TELEGRAM_DEFAULT_CHAT_ID || process.env.TELEGRAM_CHAT_ID),
+        animelibCookie: !!process.env.ANIMELIB_COOKIE,
+        animelibUserId: !!process.env.ANIMELIB_USER_ID,
+        shikimoriToken: !!process.env.SHIKIMORI_ACCESS_TOKEN || fs.existsSync(path.join(process.cwd(), '.shikimori_token.json')),
+      },
+      preferences: {
+        check_interval_min: prefs.check_interval_min,
+        notify_only_favorites: !!prefs.notify_only_favorites,
+        favorite_voiceovers: JSON.parse(prefs.favorite_voiceovers || '[]'),
+        preferred_quality: prefs.preferred_quality,
+        card_style: prefs.card_style,
+        quiet_hours_enabled: !!prefs.quiet_hours_enabled,
+        quiet_start_hour: prefs.quiet_start_hour,
+        quiet_end_hour: prefs.quiet_end_hour,
+      },
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  app.get('/api/sync/diagnostics', async (req, res) => {
+    try {
+      const dbItems = dbService.getAllSyncItems();
+
+      let exportItems: any[] = [];
+      const exportPath = path.join(process.cwd(), 'animelib_export.json');
+      if (fs.existsSync(exportPath)) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(exportPath, 'utf-8'));
+          exportItems = Array.isArray(raw.data) ? raw.data : (Array.isArray(raw) ? raw : []);
+        } catch (_) {}
+      }
+
+      const diagnostics = dbItems.map((dbRecord) => {
+        const exportMatch = exportItems.find((e) => (e.media_id || e.media?.id) === dbRecord.media_id);
+        const media = exportMatch?.media || exportMatch?.anime || {};
+
+        const rawProgress = exportMatch?.meta?.item_number ?? exportMatch?.item?.number ?? exportMatch?.current_progress_number ?? 0;
+        const progressNum = parseFloat(String(rawProgress)) || dbRecord.last_tracked_episode || 0;
+
+        const lastItemMeta = media.metadata?.last_item;
+        const rawLatest = lastItemMeta?.number ?? media.items_count?.uploaded ?? media.last_item_number ?? 0;
+        const latestNum = parseFloat(String(rawLatest)) || 0;
+
+        const voiceovers: string[] = [];
+        if (Array.isArray(lastItemMeta?.players)) {
+          for (const pl of lastItemMeta.players) {
+            if (pl.team?.name && !voiceovers.includes(pl.team.name)) {
+              voiceovers.push(pl.team.name);
+            }
+          }
+        }
+
+        const hasNewEpisode = latestNum > (dbRecord.last_tracked_episode || 0);
+
+        let diagnosis = 'Все серии просмотрены';
+        if (latestNum === 0 && (dbRecord.last_tracked_episode || 0) === 0) {
+          diagnosis = 'Нет данных о релизах';
+        } else if (hasNewEpisode) {
+          diagnosis = `⚡ Новая серия #${latestNum} доступна! (В БД отслежено: #${dbRecord.last_tracked_episode || 0})`;
+        } else if (latestNum > 0 && latestNum === dbRecord.last_tracked_episode) {
+          diagnosis = `✅ Актуально (серия #${latestNum} отслежена)`;
+        }
+
+        return {
+          media_id: dbRecord.media_id,
+          title: dbRecord.title,
+          rus_title: dbRecord.rus_title,
+          status: dbRecord.status,
+          db_tracked_episode: dbRecord.last_tracked_episode || 0,
+          export_progress: progressNum,
+          site_latest_episode: latestNum,
+          has_new_episode: hasNewEpisode,
+          voiceovers,
+          diagnosis,
+          last_checked_at: dbRecord.last_checked_at ? new Date(dbRecord.last_checked_at).toISOString() : null,
+        };
+      });
+
+      res.json({
+        success: true,
+        totalInDb: dbItems.length,
+        totalInExport: exportItems.length,
+        diagnostics,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/sync/check', async (req, res) => {
+    try {
+      const logs: string[] = [];
+      logs.push(`[${new Date().toLocaleTimeString()}] Начинаю проверку обновлений AnimeLib...`);
+
+      let watchingList: any[] = [];
+      if (process.env.ANIMELIB_COOKIE) {
+        logs.push('[AnimeLib] Запрос к API hapi.hentaicdn.org...');
+        watchingList = await animelibService.getAllWatching();
+        logs.push(`[AnimeLib] Получено ${watchingList.length} тайтлов из списка «Смотрю»`);
+      } else {
+        logs.push('[AnimeLib] ANIMELIB_COOKIE не задан в .env, загружаю список из локального animelib_export.json...');
+        const exportPath = path.join(process.cwd(), 'animelib_export.json');
+        if (fs.existsSync(exportPath)) {
+          const raw = JSON.parse(fs.readFileSync(exportPath, 'utf-8'));
+          const rawItems = Array.isArray(raw.data) ? raw.data : (Array.isArray(raw) ? raw : []);
+
+          for (const item of rawItems) {
+            const media = item.media || item.anime || item;
+            const mediaId = media.id || item.media_id;
+            if (!mediaId) continue;
+
+            const rawProg = item.meta?.item_number ?? item.item?.number ?? item.current_progress_number ?? 0;
+            const progNum = parseFloat(String(rawProg)) || 0;
+
+            const lastItem = media.metadata?.last_item;
+            const rawLat = lastItem?.number ?? media.items_count?.uploaded ?? 0;
+            const latNum = parseFloat(String(rawLat)) || 0;
+
+            const studios: string[] = [];
+            if (Array.isArray(lastItem?.players)) {
+              for (const pl of lastItem.players) {
+                if (pl.team?.name && !studios.includes(pl.team.name)) studios.push(pl.team.name);
+              }
+            }
+
+            watchingList.push({
+              media_id: mediaId,
+              slug_url: media.slug_url || String(mediaId),
+              name: media.name || '',
+              rus_name: media.rus_name || '',
+              current_progress_number: progNum,
+              last_item_number: latNum,
+              voiceovers: studios,
+            });
+
+            dbService.upsertSyncItem({
+              media_id: mediaId,
+              title: media.name || '',
+              rus_title: media.rus_name || '',
+              status: 'watching',
+              last_tracked_episode: progNum,
+            });
+          }
+          logs.push(`[Local] Загружено ${watchingList.length} тайтлов из экспорта в базу SQLite`);
+        }
+      }
+
+      const updates: any[] = [];
+      for (const item of watchingList) {
+        const stored = dbService.getSyncItemByMediaId(item.media_id);
+        const lastTracked = stored?.last_tracked_episode ?? item.current_progress_number ?? 0;
+        const latestEp = item.last_item_number || 0;
+        const isNew = latestEp > lastTracked;
+
+        logs.push(`🔍 "${item.rus_name || item.name}": отслеживается ${lastTracked} сер., вышло ${latestEp} сер. -> ${isNew ? '🔥 НОВАЯ СЕРИЯ!' : 'актуально'}`);
+
+        if (isNew) {
+          updates.push({
+            media_id: item.media_id,
+            title: item.name,
+            rus_title: item.rus_name,
+            old_episode: lastTracked,
+            new_episode: latestEp,
+            voiceovers: item.voiceovers || [],
+          });
+          dbService.updateTrackedEpisode(item.media_id, latestEp);
+          logs.push(`💾 Сохранено в SQLite: для "${item.rus_name || item.name}" установлена отслеживаемая серия #${latestEp}`);
+        }
+      }
+
+      logs.push(`[${new Date().toLocaleTimeString()}] Проверка завершена! Найдено обновлений: ${updates.length}`);
+
+      res.json({
+        success: true,
+        updatesCount: updates.length,
+        updates,
+        logs,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/bot/preferences', (req, res) => {
+    try {
+      const userId = process.env.TELEGRAM_DEFAULT_CHAT_ID || 'default_user';
+      const updates = { ...req.body };
+      if (Array.isArray(updates.favorite_voiceovers)) {
+        updates.favorite_voiceovers = JSON.stringify(updates.favorite_voiceovers);
+      }
+      dbService.updateUserPreferences(userId, updates);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post('/api/sync/update-episode', (req, res) => {
+    try {
+      const { mediaId, episode } = req.body;
+      if (!mediaId || episode === undefined) {
+        return res.status(400).json({ success: false, error: 'mediaId and episode are required' });
+      }
+      dbService.updateTrackedEpisode(Number(mediaId), Number(episode));
+      res.json({ success: true, mediaId, episode: Number(episode) });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
     }
   });
 
