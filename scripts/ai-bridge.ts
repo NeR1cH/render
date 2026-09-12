@@ -147,7 +147,7 @@ const releaseTool = {
 async function main() {
   const prompt = process.argv.slice(2).join(' ').trim();
   if (!prompt) {
-    console.log('Usage: pnpm ai:bridge "Describe the requested change"');
+    console.log('Usage: npm run ai:bridge -- "Describe the requested change"');
     return;
   }
 

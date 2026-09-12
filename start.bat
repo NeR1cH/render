@@ -6,7 +6,7 @@ echo ======================================================
 echo [1/2] Checking Shikimori authorization and tokens...
 echo ======================================================
 
-call pnpm test:shikimori
+call npm run test:shikimori
 set "TEST_EXIT_CODE=%errorlevel%"
 if not "%TEST_EXIT_CODE%"=="0" (
     color 4F
@@ -25,5 +25,5 @@ echo [2/2] Starting Anime Tracker Bot...
 echo ======================================================
 echo.
 
-call pnpm bot
+call npm run bot
 pause
