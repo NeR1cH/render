@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard, Keyboard, Context } from 'grammy';
 import dotenv from 'dotenv';
-import { animelibService } from '../services/animelib';
+import { animelibService, ANIMELIB_WEB_URL } from '../services/animelib';
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 
@@ -129,8 +129,8 @@ export function formatAnimeCard(data: {
   // Full rich card style
   let desc = '';
   if (data.description) {
-    const cleanDesc = data.description.replace(/<[^>]*>?/gm, '').trim();
-    const truncated = cleanDesc.length > 200 ? `${cleanDesc.slice(0, 200)}...` : cleanDesc;
+    const cleanDesc = stripBBCode(data.description);
+    const truncated = cleanDesc.length > 220 ? `${cleanDesc.slice(0, 220)}...` : cleanDesc;
     desc = `\n📖 <i>${escapeHtml(truncated)}</i>`;
   }
 
@@ -162,9 +162,9 @@ export function buildAnimeCardKeyboard(item: {
   const kb = new InlineKeyboard();
 
   const animelibUrl = item.slugUrl
-    ? `https://animelib.me/ru/anime/${item.slugUrl}`
+    ? `${ANIMELIB_WEB_URL}/ru/anime/${item.slugUrl}`
     : item.mediaId
-      ? `https://animelib.me/ru/anime/${item.mediaId}`
+      ? `${ANIMELIB_WEB_URL}/ru/anime/${item.mediaId}`
       : null;
 
   const shikimoriUrl = item.shikiId ? `https://shikimori.one/animes/${item.shikiId}` : null;
@@ -201,6 +201,21 @@ export function escapeHtml(str: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+export function stripBBCode(text: string): string {
+  if (!text) return '';
+  let str = text;
+  // Unwrap tags that wrap meaningful text (repeating to support nested tags)
+  for (let i = 0; i < 3; i++) {
+    str = str.replace(/\[([a-zA-Z0-9_]+)(?:=[^\]]*)?\]([\s\S]*?)\[\/\1\]/gi, (_match, _tag, content) => content);
+  }
+  // Remove standalone or self-closing tags like [poster=123], [image=...], [/character]
+  str = str.replace(/\[\/?[a-zA-Z0-9_]+(?:=[^\]]*)?\]/gi, '');
+  // Remove any raw HTML tags
+  str = str.replace(/<[^>]*>?/gm, '');
+  // Normalize whitespace
+  return str.replace(/\s+/g, ' ').trim();
 }
 
 // ==========================================
@@ -785,7 +800,7 @@ async function handleWatchEpisode(ctx: Context, mediaId: number, episode: number
 
   // 4. Update message inline (replacing action button with "Просмотрено" status)
   const updatedKb = new InlineKeyboard();
-  const animelibUrl = `https://animelib.me/ru/anime/${mediaId}`;
+  const animelibUrl = `${ANIMELIB_WEB_URL}/ru/anime/${mediaId}`;
   updatedKb.url('🌐 AnimeLib', animelibUrl);
   if (shikiId > 0) {
     updatedKb.url('📊 Shikimori', `https://shikimori.one/animes/${shikiId}`);

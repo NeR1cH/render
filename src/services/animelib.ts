@@ -39,6 +39,8 @@ export function parseEpisodeNumber(val: any): number {
   return Number.isFinite(num) ? num : 0;
 }
 
+export const ANIMELIB_WEB_URL = (process.env.ANIMELIB_WEB_URL || 'https://animelib.org').replace(/\/+$/, '');
+
 export class AnimeLibService {
   private client: AxiosInstance;
   private readonly baseUrl = process.env.ANIMELIB_API_URL || 'https://hapi.hentaicdn.org/api';
@@ -51,8 +53,8 @@ export class AnimeLibService {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://animelib.me/',
-        'Origin': 'https://animelib.me',
+        'Referer': `${ANIMELIB_WEB_URL}/`,
+        'Origin': ANIMELIB_WEB_URL,
       },
     });
   }
