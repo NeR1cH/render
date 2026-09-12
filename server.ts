@@ -4,6 +4,7 @@ import fs from 'fs';
 import cors from 'cors';
 import { checkAnimeUpdates } from './src/bot/index';
 import { dbService } from './src/db/database';
+import { getLibraryComprehensiveStats } from './src/services/libraryStats';
 
 interface ShikiMatch {
   id: number;
@@ -163,7 +164,7 @@ function loadInitialData() {
           source_status_code: item.source_status_code || item.status,
           extra_flag: item.extra_flag || STATUS_MAP_NUMERIC[item.status]?.extra_flag || null,
           is_custom_list: src.isCustom,
-          list_name: src.listName,
+          list_name: STATUS_MAP_NUMERIC[item.status]?.slug || src.listName,
           matched_shiki_id: match?.id || null,
           matched_shiki_name: match?.name || null,
           match_score: match?.score || null,
@@ -313,14 +314,15 @@ async function startServer() {
     const pending = total - migrated;
 
     const byStatus = {
-      watching: titlesList.filter((t) => t.list_name === 'watching').length,
-      planned: titlesList.filter((t) => t.list_name === 'planned').length,
-      completed: titlesList.filter((t) => t.list_name === 'completed').length,
-      dropped: titlesList.filter((t) => t.list_name === 'dropped').length,
-      fate: titlesList.filter((t) => t.list_name === 'fate').length,
-      hentai: titlesList.filter((t) => t.list_name === 'hentai').length,
-      rewatching: titlesList.filter((t) => t.status === 26).length,
-      on_hold: titlesList.filter((t) => t.status === 27).length,
+      watching: titlesList.filter((t) => t.list_name === 'watching' || t.status === 21).length,
+      planned: titlesList.filter((t) => t.list_name === 'planned' || t.status === 22).length,
+      completed: titlesList.filter((t) => (t.list_name === 'completed' || t.status === 24) && t.status !== 25 && t.status !== 2280926 && t.status !== 2643707).length,
+      favorites: titlesList.filter((t) => t.list_name === 'favorites' || t.status === 25).length,
+      dropped: titlesList.filter((t) => t.list_name === 'dropped' || t.status === 23).length,
+      fate: titlesList.filter((t) => t.list_name === 'fate' || t.status === 2280926).length,
+      hentai: titlesList.filter((t) => t.list_name === 'hentai' || t.status === 2643707).length,
+      rewatching: titlesList.filter((t) => t.list_name === 'rewatching' || t.status === 26).length,
+      on_hold: titlesList.filter((t) => t.list_name === 'on_hold' || t.status === 27).length,
     };
 
     res.json({
@@ -347,6 +349,21 @@ async function startServer() {
         ...val,
       })),
     });
+  });
+
+  app.get('/api/library-stats', async (req, res) => {
+    try {
+      const stats = await getLibraryComprehensiveStats();
+      res.json({
+        success: true,
+        stats,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Не удалось получить статистику библиотеки',
+      });
+    }
   });
 
   app.get('/api/titles', (req, res) => {

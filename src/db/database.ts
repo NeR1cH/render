@@ -67,6 +67,30 @@ db.exec('CREATE TABLE IF NOT EXISTS user_preferences (' +
   'quiet_end_hour INTEGER DEFAULT 8' +
 ');');
 
+db.exec('CREATE TABLE IF NOT EXISTS check_reports (' +
+  'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+  'timestamp INTEGER NOT NULL, ' +
+  'checked_count INTEGER NOT NULL, ' +
+  'updates_count INTEGER NOT NULL, ' +
+  'matched_count INTEGER NOT NULL, ' +
+  'synced_count INTEGER NOT NULL, ' +
+  'status TEXT NOT NULL, ' +
+  'message TEXT, ' +
+  'details_json TEXT' +
+');');
+
+export interface CheckReportRecord {
+  id: number;
+  timestamp: number;
+  checked_count: number;
+  updates_count: number;
+  matched_count: number;
+  synced_count: number;
+  status: string;
+  message?: string;
+  details_json?: string;
+}
+
 export interface AnimeLibSyncRecord {
   media_id: number;
   title: string;
@@ -251,9 +275,14 @@ export const dbService = {
     stmt.run(Date.now(), mediaId);
   },
 
-  markShikiSynced(mediaId: number, shikiId: number) {
-    const stmt = db.prepare('UPDATE animelib_sync SET shiki_id = ?, shiki_synced = 1 WHERE media_id = ?');
-    stmt.run(shikiId, mediaId);
+  markShikiSynced(mediaId: number, shikiId: number, status?: string) {
+    if (status) {
+      const stmt = db.prepare('UPDATE animelib_sync SET shiki_id = ?, shiki_synced = 1, status = ? WHERE media_id = ?');
+      stmt.run(shikiId, status, mediaId);
+    } else {
+      const stmt = db.prepare('UPDATE animelib_sync SET shiki_id = ?, shiki_synced = 1 WHERE media_id = ?');
+      stmt.run(shikiId, mediaId);
+    }
   },
 
   getUserPreferences(userId: string): UserPreferencesRecord {
@@ -293,5 +322,41 @@ export const dbService = {
     }
 
     this.updateUserPreferences(userId, { favorite_voiceovers: JSON.stringify(list) });
-  }
+  },
+
+  saveCheckReport(report: {
+    timestamp?: number;
+    checked_count: number;
+    updates_count: number;
+    matched_count: number;
+    synced_count: number;
+    status: string;
+    message?: string;
+    details_json?: string;
+  }) {
+    const stmt = db.prepare(
+      'INSERT INTO check_reports (timestamp, checked_count, updates_count, matched_count, synced_count, status, message, details_json) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    stmt.run(
+      report.timestamp || Date.now(),
+      report.checked_count,
+      report.updates_count,
+      report.matched_count,
+      report.synced_count,
+      report.status,
+      report.message || '',
+      report.details_json || '[]'
+    );
+  },
+
+  getLatestCheckReport(): CheckReportRecord | null {
+    try {
+      const stmt = db.prepare('SELECT * FROM check_reports ORDER BY timestamp DESC LIMIT 1');
+      const row = stmt.get() as unknown as CheckReportRecord | undefined;
+      return row || null;
+    } catch {
+      return null;
+    }
+  },
 };

@@ -302,6 +302,18 @@ export class ShikimoriService {
     }
   }
 
+  async getUserFavourites(): Promise<{ animes?: any[] } | null> {
+    const userId = process.env.SHIKIMORI_USER_ID;
+    if (!userId) return null;
+
+    try {
+      const res = await this.client.get(`/api/users/${userId}/favourites`, { headers: await this.getHeaders() });
+      return res.data || null;
+    } catch (err: any) {
+      return null;
+    }
+  }
+
   async getAllUserRates(forceRefresh = false): Promise<any[]> {
     const userId = process.env.SHIKIMORI_USER_ID;
     if (!userId) return [];

@@ -140,7 +140,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ stats, onN
           </button>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
           <div className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-4">
             <div className="flex items-center gap-2 text-xs text-emerald-400 font-medium mb-1">
               <CheckCheck className="w-4 h-4" />
@@ -168,8 +168,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({ stats, onN
             <div className="text-[11px] text-slate-500">Код: 22 (planned)</div>
           </div>
 
-          <div className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-4">
+          <div className="bg-slate-900/60 border border-rose-500/20 rounded-xl p-4">
             <div className="flex items-center gap-2 text-xs text-rose-400 font-medium mb-1">
+              <Bookmark className="w-4 h-4" />
+              <span>Любимые</span>
+            </div>
+            <div className="text-xl font-bold text-white">{stats.byStatus.favorites || 0}</div>
+            <div className="text-[11px] text-slate-500">Код: 25 (favorites)</div>
+          </div>
+
+          <div className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-4">
+            <div className="flex items-center gap-2 text-xs text-slate-400 font-medium mb-1">
               <XCircle className="w-4 h-4" />
               <span>Брошено</span>
             </div>

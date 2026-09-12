@@ -30,6 +30,7 @@ export interface MigrationStats {
     watching: number;
     planned: number;
     completed: number;
+    favorites: number;
     dropped: number;
     fate: number;
     hentai: number;

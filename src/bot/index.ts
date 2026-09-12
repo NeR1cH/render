@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { animelibService, AnimeLibService, ANIMELIB_WEB_URL } from '../services/animelib';
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
+import { getLibraryComprehensiveStats } from '../services/libraryStats';
 
 dotenv.config();
 
@@ -283,6 +284,16 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
     const watchingList = await animelibService.getAllWatching();
 
     if (!watchingList || watchingList.length === 0) {
+      dbService.saveCheckReport({
+        timestamp: Date.now(),
+        checked_count: 0,
+        updates_count: 0,
+        matched_count: 0,
+        synced_count: 0,
+        status: 'warning',
+        message: 'Список «Смотрю» пуст или требуется обновление cookie',
+      });
+
       if (notifyIfEmpty) {
         await send(
           '📭 В списке <b>«Смотрю»</b> пока нет тайтлов, либо нужно обновить куку в <code>ANIMELIB_COOKIE</code>.',
@@ -444,6 +455,28 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
       );
     }
 
+    const matchedCount = watchingList.filter((item) => {
+      const s = dbService.getSyncItemByMediaId(item.media_id);
+      return !!s?.shiki_id;
+    }).length;
+    const syncedCount = watchingList.filter((item) => {
+      const s = dbService.getSyncItemByMediaId(item.media_id);
+      return s?.shiki_synced === 1;
+    }).length;
+
+    const reportMsg = updatesCount > 0 ? `Найдено новых серий: ${updatesCount}` : 'Все серии актуальны ✅';
+
+    dbService.saveCheckReport({
+      timestamp: Date.now(),
+      checked_count: watchingList.length,
+      updates_count: updatesCount,
+      matched_count: matchedCount,
+      synced_count: syncedCount,
+      status: 'ok',
+      message: reportMsg,
+      details_json: JSON.stringify(updatedTitles),
+    });
+
     return {
       success: true,
       checkedCount: watchingList.length,
@@ -453,6 +486,16 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
     };
   } catch (err: any) {
     console.error('Check anime updates error:', err);
+    dbService.saveCheckReport({
+      timestamp: Date.now(),
+      checked_count: 0,
+      updates_count: 0,
+      matched_count: 0,
+      synced_count: 0,
+      status: 'error',
+      message: err.message || 'Ошибка проверки обновлений',
+    });
+
     await send(`❌ <b>Ошибка при проверке:</b>\n<code>${escapeHtml(err.message)}</code>`, {
       parse_mode: 'HTML',
     });
@@ -824,40 +867,70 @@ async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned
 async function showUserProfile(ctx: Context) {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
   const profile = await shikimoriService.getUserProfile();
-
-  const allSync = dbService.getAllSyncItems();
-  const watchingCount = allSync.filter((s) => s.status === 'watching').length;
-  const completedCount = allSync.filter((s) => s.status === 'completed').length;
-
-  const shikiStats = profile?.stats?.statuses?.anime || profile?.stats?.full_statuses?.anime || [];
-  const shikiPlanned = shikiStats.find((s: any) => s.grouped_id === 'planned')?.size ?? '—';
-  const shikiCompleted = shikiStats.find((s: any) => s.grouped_id === 'completed')?.size ?? '—';
-  const shikiWatching = shikiStats.find((s: any) => s.grouped_id === 'watching,rewatching' || s.grouped_id === 'watching')?.size ?? 0;
+  const libStats = await getLibraryComprehensiveStats(userId);
 
   const animelibUserId = process.env.ANIMELIB_USER_ID || 'Не указан';
   const shikiNick = profile?.nickname || 'Не привязан';
   const shikiId = profile?.id ? String(profile.id) : '—';
 
+  let checkSection: string;
+  if (libStats.lastCheck) {
+    const statusIcon =
+      libStats.lastCheck.status === 'ok'
+        ? libStats.lastCheck.updatesCount > 0
+          ? '🔔'
+          : '✅'
+        : libStats.lastCheck.status === 'warning'
+        ? '⚠️'
+        : '❌';
+
+    checkSection = [
+      '⏱ <b>Результат последней проверки:</b>',
+      `  • 🕒 <b>Время проверки:</b> <code>${libStats.lastCheck.formattedTime}</code> (<i>${libStats.lastCheck.relativeTime}</i>)`,
+      `  • ${statusIcon} <b>Статус:</b> <b>${escapeHtml(libStats.lastCheck.message)}</b>`,
+      `  • 🔍 <b>Проверено тайтлов:</b> <code>${libStats.lastCheck.checkedCount}</code> онгоингов`,
+      `  • 🎯 <b>Сверено с Shikimori:</b> <code>${libStats.lastCheck.matchedCount} из ${libStats.lastCheck.checkedCount}</code>`,
+      `  • ⏰ <b>Следующая автопроверка:</b> <code>через ${libStats.lastCheck.nextCheckInMinutes} мин</code> (интервал: ${libStats.lastCheck.checkIntervalMinutes} мин)`,
+    ].join('\n');
+  } else {
+    const prefs = dbService.getUserPreferences(userId);
+    checkSection = [
+      '⏱ <b>Результат последней проверки:</b>',
+      '  • 🕒 <i>Ожидается первая проверка тайтлов...</i>',
+      `  • ⏰ <b>Интервал автопроверки:</b> каждые <code>${prefs.check_interval_min || 30} мин</code>`,
+      '  • 💡 <i>Нажмите «🔄 Проверить серии», чтобы запустить немедленно.</i>',
+    ].join('\n');
+  }
+
   const lines = [
-    '👤 <b>Карточка профиля & Статистика</b>',
+    '👤 <b>Карточка профиля & Статистика библиотеки</b>',
     '━━━━━━━━━━━━━━━━━━━━',
     `🆔 <b>Telegram ID:</b> <code>${userId}</code>`,
-    `🌐 <b>Shikimori:</b> <code>${shikiNick}</code> (ID: <code>${shikiId}</code>)`,
-    `📚 <b>AnimeLib ID:</b> <code>${animelibUserId}</code>`,
+    `🌐 <b>Shikimori:</b> <code>${escapeHtml(shikiNick)}</code> (ID: <code>${shikiId}</code>)`,
+    `📚 <b>AnimeLib ID:</b> <code>${escapeHtml(animelibUserId)}</code>`,
     '',
-    '📊 <b>Ваша аниме-библиотека:</b>',
-    `  • 📺 <b>Смотрю сейчас:</b> <code>${watchingCount || shikiWatching}</code> тайтлов`,
-    `  • 📌 <b>В планах (Shikimori):</b> <code>${shikiPlanned}</code> тайтлов`,
-    `  • 🏁 <b>Просмотрено:</b> <code>${shikiCompleted || completedCount}</code> аниме`,
-    `  • 💾 <b>В локальной базе:</b> <code>${allSync.length}</code> сохраненных записей`,
+    '📊 <b>Категории аниме (Все вкладки):</b>',
+    `  • 📺 <b>Смотрю сейчас:</b> <code>${libStats.watching}</code> тайтлов`,
+    `  • 📌 <b>В планах:</b> <code>${libStats.planned}</code> тайтлов`,
+    `  • 🏁 <b>Просмотрено:</b> <code>${libStats.completed}</code> аниме`,
+    `  • ❤️ <b>Любимые:</b> <code>${libStats.favorites}</code> тайтлов`,
+    `  • 🔁 <b>Пересматриваю:</b> <code>${libStats.rewatching}</code>`,
+    `  • ⏸️ <b>Отложено:</b> <code>${libStats.on_hold}</code>`,
+    `  • 🚫 <b>Брошено:</b> <code>${libStats.dropped}</code> тайтлов`,
+    `  • ⚔️ <b>FATE (коллекция):</b> <code>${libStats.fate}</code> тайтлов`,
+    '  ──────────────────',
+    `  📦 <b>Всего в библиотеке:</b> <code>${libStats.totalTracked}</code> тайтлов`,
     '',
-    '🔄 <b>Синхронизация аккаунтов:</b>',
-    '  • AnimeLib ➔ SQLite ➔ Shikimori: <b>Активна ✅</b>',
-    '  • Отметка серий прямо в Telegram: <b>Включена ✅</b>',
+    '🔄 <b>Синхронизация & Перенос на Shikimori:</b>',
+    `  • 🚀 <b>Перенесено на Shikimori:</b> <code>${libStats.shikiTransferredCount} / ${libStats.totalTracked}</code> (${libStats.shikiMatchRatePercent}%)`,
+    `  • 🎯 <b>Проверено & сматчено:</b> <code>${libStats.shikiVerifiedCount}</code> тайтлов`,
+    '  • 🔗 <b>Мост синхронизации:</b> AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]',
+    '',
+    checkSection,
   ];
 
   const kb = new InlineKeyboard()
-    .text('🔄 Синхронизировать', 'check_updates')
+    .text('🔄 Проверить серии', 'check_updates')
     .text('📺 Мой список', 'list_watching')
     .row();
 
@@ -1065,7 +1138,9 @@ bot.callbackQuery(/^mark_completed:(\d+):(\d+)$/, async (ctx) => {
       status: 'completed',
     });
 
-    dbService.markShikiSynced(mediaId, shikiId);
+    dbService.markShikiSynced(mediaId, shikiId, 'completed');
+    animelibService.invalidateWatchingCache();
+    shikimoriService.invalidateExclusionCache();
 
     await ctx.reply(`🎉 <b>Поздравляем!</b> Тайтл успешно перенесён в <b>«Просмотрено»</b> на Shikimori.`, {
       parse_mode: 'HTML',
@@ -1195,6 +1270,7 @@ bot.callbackQuery(/^set_interval:(\d+)$/, async (ctx) => {
   const interval = parseInt(ctx.match[1], 10);
 
   dbService.updateUserPreferences(userId, { check_interval_min: interval });
+  restartScheduler(userId);
   await ctx.answerCallbackQuery({ text: `Интервал: ${interval} мин` });
 
   const { text, keyboard } = renderSettingsKeyboard(userId);
@@ -1206,18 +1282,30 @@ bot.callbackQuery(/^set_interval:(\d+)$/, async (ctx) => {
 // ==========================================
 // Scheduler
 // ==========================================
-export function startScheduler(intervalMinutes: number = 30) {
+let schedulerIntervalId: NodeJS.Timeout | null = null;
+
+export function restartScheduler(userId: string = DEFAULT_CHAT_ID || 'default_user') {
+  if (schedulerIntervalId) {
+    clearInterval(schedulerIntervalId);
+    schedulerIntervalId = null;
+  }
+  const prefs = dbService.getUserPreferences(userId);
+  const intervalMinutes = prefs.check_interval_min || 30;
   console.log(`⏱️ Scheduler initialized. Checking updates every ${intervalMinutes} minutes.`);
   const intervalMs = intervalMinutes * 60 * 1000;
 
-  setInterval(async () => {
-    console.log('[Scheduler] Running automated background check...');
+  schedulerIntervalId = setInterval(async () => {
+    console.log(`[Scheduler] Running automated background check (every ${intervalMinutes}m)...`);
     try {
       await checkAnimeUpdates(undefined, false);
     } catch (e) {
       console.error('[Scheduler Error]:', e);
     }
   }, intervalMs);
+}
+
+export function startScheduler(intervalMinutes: number = 30) {
+  restartScheduler(DEFAULT_CHAT_ID || 'default_user');
 }
 
 // ==========================================
