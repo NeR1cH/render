@@ -5,6 +5,7 @@ import cors from 'cors';
 import { checkAnimeUpdates } from './src/bot/index';
 import { dbService } from './src/db/database';
 import { getLibraryComprehensiveStats } from './src/services/libraryStats';
+import { downloaderService } from './src/services/downloader';
 
 interface ShikiMatch {
   id: number;
@@ -304,6 +305,74 @@ async function startServer() {
       res.status(500).json({
         success: false,
         error: err?.message || 'Не удалось загрузить записи из локальной базы данных',
+      });
+    }
+  });
+
+  // Downloads Queue API Endpoints
+  app.get('/api/downloads', (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+      const queue = downloaderService.getQueue(limit);
+      res.json({
+        success: true,
+        count: queue.length,
+        queue,
+      });
+    } catch (err: any) {
+      console.error('[API /api/downloads GET Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Не удалось получить очередь загрузок',
+      });
+    }
+  });
+
+  app.post('/api/downloads', async (req, res) => {
+    try {
+      const { media_id, episode, voiceover } = req.body || {};
+
+      if (!media_id || episode === undefined || episode === null) {
+        return res.status(400).json({
+          success: false,
+          error: 'Поля media_id и episode обязательны для добавления в очередь',
+        });
+      }
+
+      const mediaIdNum = Number(media_id);
+      const episodeNum = Number(episode);
+
+      if (isNaN(mediaIdNum) || isNaN(episodeNum)) {
+        return res.status(400).json({
+          success: false,
+          error: 'media_id и episode должны быть числовыми значениями',
+        });
+      }
+
+      const taskId = downloaderService.addToQueue(
+        mediaIdNum,
+        episodeNum,
+        voiceover ? String(voiceover).trim() : undefined
+      );
+
+      // Фоновый запуск обработки очереди
+      downloaderService.processQueue().catch((err) => {
+        console.error('[API /api/downloads] Ошибка при фоновой обработке очереди:', err);
+      });
+
+      const task = downloaderService.getStatus(taskId);
+
+      res.status(201).json({
+        success: true,
+        message: 'Задача успешно добавлена в очередь загрузки',
+        taskId,
+        task,
+      });
+    } catch (err: any) {
+      console.error('[API /api/downloads POST Error]:', err);
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Ошибка сервера при добавлении задачи в очередь загрузки',
       });
     }
   });

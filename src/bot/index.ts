@@ -4,6 +4,7 @@ import { animelibService, AnimeLibService, ANIMELIB_WEB_URL } from '../services/
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 import { getLibraryComprehensiveStats } from '../services/libraryStats';
+import { downloaderService } from '../services/downloader';
 
 dotenv.config();
 
@@ -185,7 +186,8 @@ export function buildAnimeCardKeyboard(item: {
   if (item.mediaId) {
     kb.row();
     const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
-    kb.text(`👁 Отметить серию #${epToMark} просмотренной`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
+    kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
+    kb.text('📥 Скачать серию', `dl_${item.mediaId}_${epToMark}`);
     if (item.shikiId) {
       kb.row();
       kb.text('⭐️ Оценить', `rate_menu:${item.shikiId}`);
@@ -437,6 +439,27 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
           // Save tracked episode in SQLite
           dbService.updateTrackedEpisode(item.media_id, latestEpisode);
+
+          // Авто-загрузка по предпочтениям (если включён auto_download_enabled или флаг среды)
+          const isAutoDownloadOn = Boolean(prefs.auto_download_enabled || process.env.AUTO_DOWNLOAD_ENABLED === 'true');
+          if (isAutoDownloadOn && stored?.preferred_voiceover) {
+            const availableVoiceovers = mediaEpisodes.latestVoiceovers?.length
+              ? mediaEpisodes.latestVoiceovers
+              : mediaEpisodes.voiceovers;
+
+            const prefVoNorm = stored.preferred_voiceover.trim().toLowerCase();
+            const isMatched = availableVoiceovers?.some((vo) =>
+              vo.toLowerCase().includes(prefVoNorm) || prefVoNorm.includes(vo.toLowerCase())
+            );
+
+            if (isMatched) {
+              console.log(`[AutoDownload] 📥 Авто-загрузка серии #${latestEpisode} для «${item.name}» (Озвучка: ${stored.preferred_voiceover})`);
+              downloaderService.addToQueue(item.media_id, latestEpisode, stored.preferred_voiceover);
+              downloaderService.processQueue().catch((err) => {
+                console.error('[AutoDownload] Ошибка фоновой обработки очереди загрузок:', err);
+              });
+            }
+          }
         } else {
           dbService.updateLastChecked(item.media_id);
         }
@@ -1125,6 +1148,60 @@ bot.callbackQuery(/^add_ep:(\d+):([\d.]+):(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery({ text: 'Серия уже отмечена как просмотренная!' }));
+
+// Download button callback: dl_<media_id>_<ep>
+bot.callbackQuery(/^dl_(\d+)_([\d.]+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const episode = parseFloat(ctx.match[2]);
+
+  // 1. Быстрый ответ пользователю
+  await ctx.answerCallbackQuery({ text: '⏳ Серия добавлена в очередь загрузки!' });
+
+  // 2. Определение предпочтительной озвучки (из тайтла или из общих настроек)
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  let targetVoiceover = stored?.preferred_voiceover;
+  if (!targetVoiceover) {
+    const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
+    const prefs = dbService.getUserPreferences(userId);
+    try {
+      const favs: string[] = JSON.parse(prefs.favorite_voiceovers || '[]');
+      if (favs.length > 0) targetVoiceover = favs[0];
+    } catch {}
+  }
+
+  // 3. Постановка задачи в очередь загрузки
+  downloaderService.addToQueue(mediaId, episode, targetVoiceover || undefined);
+
+  // 4. Фоновый запуск обработки очереди
+  downloaderService.processQueue().catch((err) => {
+    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
+  });
+
+  // 5. Обновление inline-кнопок: заменяем кнопку скачивания на "⏳ В очереди загрузки"
+  if (ctx.msg?.reply_markup?.inline_keyboard) {
+    const targetCallback = `dl_${mediaId}_${episode}`;
+    const updatedRows = ctx.msg.reply_markup.inline_keyboard.map((row) =>
+      row.map((btn) => {
+        if ('callback_data' in btn && (btn.callback_data === targetCallback || btn.callback_data.startsWith(`dl_${mediaId}_`))) {
+          return { text: '⏳ В очереди загрузки', callback_data: 'noop_dl' };
+        }
+        return btn;
+      })
+    );
+
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: { inline_keyboard: updatedRows },
+      });
+    } catch {
+      // Игнорируем ошибку, если сообщение не изменилось
+    }
+  }
+});
+
+bot.callbackQuery('noop_dl', (ctx) =>
+  ctx.answerCallbackQuery({ text: 'Серия уже в очереди загрузки или скачивается!' })
+);
 
 // Mark Completed
 bot.callbackQuery(/^mark_completed:(\d+):(\d+)$/, async (ctx) => {

@@ -64,8 +64,14 @@ db.exec('CREATE TABLE IF NOT EXISTS user_preferences (' +
   'check_interval_min INTEGER DEFAULT 30, ' +
   'quiet_hours_enabled INTEGER DEFAULT 0, ' +
   'quiet_start_hour INTEGER DEFAULT 23, ' +
-  'quiet_end_hour INTEGER DEFAULT 8' +
+  'quiet_end_hour INTEGER DEFAULT 8, ' +
+  'auto_download_enabled INTEGER DEFAULT 0' +
 ');');
+
+try {
+  db.exec('ALTER TABLE user_preferences ADD COLUMN auto_download_enabled INTEGER DEFAULT 0');
+} catch {
+}
 
 db.exec('CREATE TABLE IF NOT EXISTS check_reports (' +
   'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
@@ -140,6 +146,7 @@ export interface UserPreferencesRecord {
   quiet_hours_enabled: number;
   quiet_start_hour: number;
   quiet_end_hour: number;
+  auto_download_enabled?: number;
 }
 
 export interface OAuthTokenRecord {
