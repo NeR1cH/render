@@ -81,6 +81,30 @@ db.exec('CREATE TABLE IF NOT EXISTS check_reports (' +
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_check_reports_timestamp ON check_reports(timestamp DESC);');
 
+db.exec('CREATE TABLE IF NOT EXISTS download_queue (' +
+  'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+  'media_id INTEGER NOT NULL, ' +
+  'episode REAL NOT NULL, ' +
+  'voiceover TEXT, ' +
+  'status TEXT NOT NULL DEFAULT \'pending\', ' +
+  'progress INTEGER NOT NULL DEFAULT 0, ' +
+  'file_path TEXT, ' +
+  'created_at INTEGER NOT NULL' +
+');');
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_download_queue_status ON download_queue(status, created_at);');
+
+export interface DownloadQueueRecord {
+  id: number;
+  media_id: number;
+  episode: number;
+  voiceover?: string | null;
+  status: 'pending' | 'downloading' | 'completed' | 'error';
+  progress: number;
+  file_path?: string | null;
+  created_at: number;
+}
+
 export interface CheckReportRecord {
   id: number;
   timestamp: number;
@@ -368,6 +392,58 @@ export const dbService = {
       return stmt.all(limit) as unknown as CheckReportRecord[];
     } catch {
       return [];
+    }
+  },
+
+  addToDownloadQueue(mediaId: number, episode: number, voiceover?: string): number {
+    const stmt = db.prepare(
+      'INSERT INTO download_queue (media_id, episode, voiceover, status, progress, created_at) VALUES (?, ?, ?, \'pending\', 0, ?)'
+    );
+    const result = stmt.run(mediaId, episode, voiceover || null, Date.now());
+    return Number(result.lastInsertRowid);
+  },
+
+  updateDownloadStatus(
+    id: number,
+    status: 'pending' | 'downloading' | 'completed' | 'error',
+    progress?: number,
+    filePath?: string
+  ): void {
+    const existing = db.prepare('SELECT progress, file_path FROM download_queue WHERE id = ?').get(id) as any;
+    const finalProgress = progress !== undefined ? progress : (existing?.progress ?? 0);
+    const finalFilePath = filePath !== undefined ? filePath : (existing?.file_path ?? null);
+
+    const stmt = db.prepare(
+      'UPDATE download_queue SET status = ?, progress = ?, file_path = ? WHERE id = ?'
+    );
+    stmt.run(status, finalProgress, finalFilePath, id);
+  },
+
+  getPendingDownloads(): DownloadQueueRecord[] {
+    try {
+      const stmt = db.prepare('SELECT * FROM download_queue WHERE status = \'pending\' ORDER BY created_at ASC');
+      return stmt.all() as unknown as DownloadQueueRecord[];
+    } catch {
+      return [];
+    }
+  },
+
+  getDownloadQueue(limit: number = 50): DownloadQueueRecord[] {
+    try {
+      const stmt = db.prepare('SELECT * FROM download_queue ORDER BY created_at DESC LIMIT ?');
+      return stmt.all(limit) as unknown as DownloadQueueRecord[];
+    } catch {
+      return [];
+    }
+  },
+
+  getDownloadById(id: number): DownloadQueueRecord | null {
+    try {
+      const stmt = db.prepare('SELECT * FROM download_queue WHERE id = ?');
+      const row = stmt.get(id) as unknown as DownloadQueueRecord | undefined;
+      return row || null;
+    } catch {
+      return null;
     }
   },
 };

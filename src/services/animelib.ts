@@ -18,6 +18,14 @@ export interface AnimeLibEpisodeInfo {
   latestVoiceovers: string[];
 }
 
+export interface DirectVideoLinkResult {
+  url: string;
+  quality?: string;
+  voiceover?: string;
+  playerType?: string;
+  format?: 'm3u8' | 'mp4' | 'stream';
+}
+
 export function parseEpisodeNumber(val: any): number {
   if (val === null || val === undefined) return 0;
   if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
@@ -297,6 +305,173 @@ export class AnimeLibService {
       } catch (scrapeErr: any) {
         return { latestEpisode: 0, voiceovers: [], latestVoiceovers: [] };
       }
+    }
+  }
+
+  /**
+   * Получение прямой ссылки на видеопоток (m3u8/mp4/stream) из плеера AnimeLib.
+   * Обращается к эндпоинтам эпизодов, находит нужный эпизод, отбирает плеер по озвучке
+   * и извлекает прямую ссылку на видеопоток.
+   */
+  async getDirectVideoLink(
+    mediaId: number | string,
+    episode: number,
+    targetVoiceover?: string
+  ): Promise<DirectVideoLinkResult | null> {
+    const id = typeof mediaId === 'string' ? parseInt(mediaId, 10) : mediaId;
+    const targetEpNum = parseEpisodeNumber(episode);
+    const headers = this.getAuthHeaders();
+    const requestHeaders = {
+      ...headers,
+      'Site-Id': '5',
+      'Referer': `${ANIMELIB_WEB_URL}/`,
+      'Origin': ANIMELIB_WEB_URL,
+    };
+
+    try {
+      // 1. Получаем список эпизодов тайтла
+      let episodesData: any[] = [];
+      try {
+        const epListRes = await this.client.get('/episodes', {
+          params: { anime_id: id },
+          headers: requestHeaders,
+        });
+        episodesData = epListRes.data?.data || epListRes.data || [];
+      } catch (listErr: any) {
+        try {
+          const epListFallback = await this.client.get(`/anime/${id}/episodes`, {
+            headers: requestHeaders,
+          });
+          episodesData = epListFallback.data?.data || epListFallback.data || [];
+        } catch {
+          episodesData = [];
+        }
+      }
+
+      if (!episodesData || episodesData.length === 0) {
+        console.warn(`[AnimeLib] No episodes found for media ID ${id}`);
+        return null;
+      }
+
+      // 2. Находим эпизод с нужным номером
+      let matchingEp = episodesData.find(
+        (ep: any) => parseEpisodeNumber(ep.number ?? ep.item_number) === targetEpNum
+      );
+
+      // Если точного совпадения нет, но запрошена 1 серия и в списке только 1 серия (фильм/спешл)
+      if (!matchingEp && episodesData.length === 1 && (targetEpNum === 1 || targetEpNum === 0)) {
+        matchingEp = episodesData[0];
+      }
+
+      if (!matchingEp) {
+        console.warn(`[AnimeLib] Episode ${targetEpNum} not found for media ID ${id}`);
+        return null;
+      }
+
+      // 3. Загружаем детальную информацию об эпизоде, если массив players отсутствует или пуст
+      let players: any[] = Array.isArray(matchingEp.players) ? matchingEp.players : [];
+      if (players.length === 0 && matchingEp.id) {
+        try {
+          const detailRes = await this.client.get(`/episodes/${matchingEp.id}`, {
+            headers: requestHeaders,
+          });
+          players = detailRes.data?.data?.players || detailRes.data?.players || [];
+        } catch (detailErr: any) {
+          console.warn(`[AnimeLib] Failed to load details for episode ID ${matchingEp.id}:`, detailErr?.message);
+        }
+      }
+
+      if (players.length === 0) {
+        console.warn(`[AnimeLib] No players found for episode ${targetEpNum} (media ID ${id})`);
+        return null;
+      }
+
+      // 4. Выбор подходящего плеера
+      let selectedPlayer: any = null;
+
+      if (targetVoiceover && targetVoiceover.trim()) {
+        const normTarget = targetVoiceover.trim().toLowerCase();
+        selectedPlayer = players.find((pl: any) => {
+          const teamName = (pl.team?.name || '').toLowerCase();
+          return teamName && (teamName.includes(normTarget) || normTarget.includes(teamName));
+        });
+      }
+
+      // Если указанная озвучка не найдена, выбираем озвучку (translation_type.id === 2), затем любой плеер с видео
+      if (!selectedPlayer) {
+        selectedPlayer =
+          players.find((pl: any) => pl.translation_type?.id === 2 && (pl.src || pl.video || pl.url)) ||
+          players.find((pl: any) => pl.src || pl.video || pl.url) ||
+          players[0];
+      }
+
+      if (!selectedPlayer) {
+        return null;
+      }
+
+      // 5. Извлечение прямой ссылки
+      let rawUrl = '';
+      let detectedQuality = '720p';
+
+      // Проверяем объект video (разные качества)
+      if (selectedPlayer.video) {
+        if (typeof selectedPlayer.video === 'string') {
+          rawUrl = selectedPlayer.video;
+        } else if (typeof selectedPlayer.video === 'object') {
+          const qualities = ['1080', '720', '480', '360'];
+          for (const q of qualities) {
+            if (selectedPlayer.video[q]) {
+              rawUrl = selectedPlayer.video[q];
+              detectedQuality = `${q}p`;
+              break;
+            }
+          }
+          if (!rawUrl && Object.values(selectedPlayer.video).length > 0) {
+            rawUrl = String(Object.values(selectedPlayer.video)[0]);
+          }
+        }
+      }
+
+      // Проверяем поля src, url, file, stream
+      if (!rawUrl) {
+        rawUrl = selectedPlayer.src || selectedPlayer.url || selectedPlayer.file || selectedPlayer.stream || '';
+      }
+
+      if (!rawUrl) {
+        console.warn(`[AnimeLib] No video stream URL found in selected player ${selectedPlayer.player || selectedPlayer.id}`);
+        return null;
+      }
+
+      // Нормализуем URL
+      let finalUrl = rawUrl.trim();
+      if (finalUrl.startsWith('//')) {
+        finalUrl = 'https:' + finalUrl;
+      }
+
+      // Определение формата
+      let format: 'm3u8' | 'mp4' | 'stream' = 'stream';
+      if (finalUrl.includes('.m3u8')) {
+        format = 'm3u8';
+      } else if (finalUrl.includes('.mp4')) {
+        format = 'mp4';
+      }
+
+      // Определяем качество из URL или плеера, если указано
+      const qualMatch = finalUrl.match(/\b(1080|720|480|360)p?\b/i);
+      if (qualMatch) {
+        detectedQuality = `${qualMatch[1]}p`;
+      }
+
+      return {
+        url: finalUrl,
+        quality: detectedQuality,
+        voiceover: selectedPlayer.team?.name || targetVoiceover || undefined,
+        playerType: selectedPlayer.player || 'AnimeLib',
+        format,
+      };
+    } catch (err: any) {
+      console.error(`[AnimeLib] getDirectVideoLink error for media ${id}, ep ${episode}:`, err?.message);
+      return null;
     }
   }
 }
