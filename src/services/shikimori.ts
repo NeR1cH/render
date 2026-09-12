@@ -1,5 +1,11 @@
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import { dbService, getTokens, saveTokens } from '../db/database.js';
+import { animelibService, AnimeLibService } from './animelib.js';
+
+export interface UserExclusionData {
+  excludedIds: Set<number>;
+  excludedKeywords: Set<string>;
+}
 
 export interface ShikimoriPoster {
   id: string;
@@ -174,9 +180,16 @@ export async function upsertUserRate(payload: UserRatePayload): Promise<any> {
 export class ShikimoriService {
   private client: AxiosInstance;
   private readonly graphqlUrl = `${SHIKIMORI_URL}/api/graphql`;
+  private userRatesCache: { rates: any[]; timestamp: number } | null = null;
+  private exclusionCache: { data: UserExclusionData; timestamp: number } | null = null;
 
   constructor() {
     this.client = shikimoriClient;
+  }
+
+  invalidateExclusionCache(): void {
+    this.userRatesCache = null;
+    this.exclusionCache = null;
   }
 
   private async getHeaders() {
@@ -289,16 +302,108 @@ export class ShikimoriService {
     }
   }
 
-  async getUserPlannedAnimeIds(limit: number = 50, page: number = 1): Promise<number[]> {
+  async getAllUserRates(forceRefresh = false): Promise<any[]> {
     const userId = process.env.SHIKIMORI_USER_ID;
     if (!userId) return [];
 
+    if (!forceRefresh && this.userRatesCache && Date.now() - this.userRatesCache.timestamp < 300000) {
+      return this.userRatesCache.rates;
+    }
+
     try {
       const res = await this.client.get('/api/v2/user_rates', {
-        params: { user_id: userId, target_type: 'Anime', status: 'planned', limit, page },
+        params: { user_id: userId, target_type: 'Anime', limit: 5000 },
         headers: await this.getHeaders(),
       });
-      return (res.data || []).map((r: any) => Number(r.target_id)).filter(Boolean);
+      const rates = Array.isArray(res.data) ? res.data : [];
+      this.userRatesCache = { rates, timestamp: Date.now() };
+      return rates;
+    } catch (err: any) {
+      console.warn('[Shikimori] Failed to fetch all user rates:', err.message);
+      return this.userRatesCache ? this.userRatesCache.rates : [];
+    }
+  }
+
+  async getUserExclusionData(forceRefresh = false): Promise<UserExclusionData> {
+    if (!forceRefresh && this.exclusionCache && Date.now() - this.exclusionCache.timestamp < 180000) {
+      return this.exclusionCache.data;
+    }
+
+    const excludedIds = new Set<number>();
+    const excludedKeywords = new Set<string>();
+
+    // 1. From Shikimori user rates: completed, watching, rewatching, dropped, on_hold
+    try {
+      const rates = await this.getAllUserRates(forceRefresh);
+      for (const r of rates) {
+        const id = Number(r.target_id);
+        const status = r.status;
+        if (['completed', 'watching', 'rewatching', 'dropped', 'on_hold'].includes(status)) {
+          if (id) excludedIds.add(id);
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Shikimori] Error processing rates for exclusion:', e.message);
+    }
+
+    // 2. From local SQLite database: watching & completed
+    try {
+      const allDb = dbService.getAllSyncItems();
+      for (const item of allDb) {
+        if (['watching', 'completed', 'dropped'].includes(item.status)) {
+          if (item.shiki_id) excludedIds.add(Number(item.shiki_id));
+          if (item.title) excludedKeywords.add(AnimeLibService.normalizeTitle(item.title).toLowerCase());
+          if (item.rus_title) excludedKeywords.add(AnimeLibService.normalizeTitle(item.rus_title).toLowerCase());
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Shikimori] Error reading SQLite for exclusion:', e.message);
+    }
+
+    // 3. From AnimeLib watching cache
+    try {
+      const watchingLib = await animelibService.getAllWatching();
+      for (const item of watchingLib) {
+        if (item.name) excludedKeywords.add(AnimeLibService.normalizeTitle(item.name).toLowerCase());
+        if (item.rus_name) excludedKeywords.add(AnimeLibService.normalizeTitle(item.rus_name).toLowerCase());
+      }
+    } catch (e: any) {
+      // Ignored if network issue, DB items already covered it
+    }
+
+    const data: UserExclusionData = { excludedIds, excludedKeywords };
+    this.exclusionCache = { data, timestamp: Date.now() };
+    return data;
+  }
+
+  isAnimeExcluded(anime: ShikimoriAnime, exclusion: UserExclusionData, extraExcludeIds: number[] = []): boolean {
+    const id = Number(anime.id);
+    if (!id) return false;
+
+    // Direct ID check
+    if (extraExcludeIds.includes(id)) return true;
+    if (exclusion.excludedIds.has(id)) return true;
+
+    // Title keywords check (prevents recommending Grand Blue Season 3 / Необъятный океан 3, etc.)
+    const normRus = AnimeLibService.normalizeTitle(anime.russian || '').toLowerCase();
+    const normEng = AnimeLibService.normalizeTitle(anime.name || '').toLowerCase();
+
+    for (const kw of exclusion.excludedKeywords) {
+      if (!kw || kw.length < 3) continue;
+      if (normRus === kw || normEng === kw) return true;
+      if (kw.length >= 4) {
+        if (normRus && (normRus.includes(kw) || kw.includes(normRus))) return true;
+        if (normEng && (normEng.includes(kw) || kw.includes(normEng))) return true;
+      }
+    }
+
+    return false;
+  }
+
+  async getUserPlannedAnimeIds(): Promise<number[]> {
+    try {
+      const rates = await this.getAllUserRates();
+      return rates.filter((r) => r.status === 'planned').map((r) => Number(r.target_id)).filter(Boolean);
     } catch (err: any) {
       console.error('[Shikimori Planned Error]', err.message);
       return [];
@@ -345,63 +450,100 @@ export class ShikimoriService {
   }
 
   async getRandomPlannedAnime(): Promise<ShikimoriAnime | null> {
-    const rec = await this.getRandomRecommendation('all');
+    const rec = await this.getRandomRecommendation('planned');
     return rec ? rec.anime : null;
+  }
+
+  private async getRandomPlannedRecommendation(
+    exclusion: UserExclusionData,
+    excludeIds: number[]
+  ): Promise<{ anime: ShikimoriAnime; source: 'planned' } | null> {
+    const plannedIds = await this.getUserPlannedAnimeIds();
+    // Exclude anything in excludeIds or user exclusion (watching/completed)
+    const eligibleIds = plannedIds.filter((id) => !exclusion.excludedIds.has(id) && !excludeIds.includes(id));
+
+    if (eligibleIds.length === 0) {
+      return null;
+    }
+
+    // Try up to 10 random candidates to find one that passes title exclusion
+    const shuffled = [...eligibleIds].sort(() => Math.random() - 0.5).slice(0, 10);
+    for (const randomId of shuffled) {
+      const anime = await this.getAnimeById(randomId);
+      if (anime && !this.isAnimeExcluded(anime, exclusion, excludeIds)) {
+        return { anime, source: 'planned' };
+      }
+    }
+    return null;
+  }
+
+  private async getRandomOngoingRecommendation(
+    exclusion: UserExclusionData,
+    excludeIds: number[]
+  ): Promise<{ anime: ShikimoriAnime; source: 'ongoing'; isAlsoPlanned?: boolean } | null> {
+    const randomPage = Math.floor(Math.random() * 4) + 1;
+    let ongoings = await this.getOngoingAnime(25, randomPage);
+    if (ongoings.length === 0 && randomPage !== 1) {
+      ongoings = await this.getOngoingAnime(25, 1);
+    }
+
+    const candidates = ongoings.filter((a) => !this.isAnimeExcluded(a, exclusion, excludeIds));
+
+    if (candidates.length > 0) {
+      const picked = candidates[Math.floor(Math.random() * candidates.length)];
+      const fullAnime = picked.description ? picked : (await this.getAnimeById(picked.id)) || picked;
+
+      const plannedIds = await this.getUserPlannedAnimeIds();
+      const isAlsoPlanned = plannedIds.includes(Number(fullAnime.id));
+
+      return { anime: fullAnime, source: 'ongoing', isAlsoPlanned };
+    }
+
+    // Fallback: try page 1
+    const page1Ongoings = await this.getOngoingAnime(30, 1);
+    const p1Candidates = page1Ongoings.filter((a) => !this.isAnimeExcluded(a, exclusion, excludeIds));
+    if (p1Candidates.length > 0) {
+      const picked = p1Candidates[Math.floor(Math.random() * p1Candidates.length)];
+      const fullAnime = picked.description ? picked : (await this.getAnimeById(picked.id)) || picked;
+      const plannedIds = await this.getUserPlannedAnimeIds();
+      const isAlsoPlanned = plannedIds.includes(Number(fullAnime.id));
+      return { anime: fullAnime, source: 'ongoing', isAlsoPlanned };
+    }
+
+    return null;
   }
 
   async getRandomRecommendation(
     category: 'all' | 'planned' | 'ongoing' = 'all',
     excludeIds: number[] = []
-  ): Promise<{ anime: ShikimoriAnime; source: 'planned' | 'ongoing' } | null> {
-    const userId = process.env.SHIKIMORI_USER_ID;
-    const preferPlanned = category === 'planned' || (category === 'all' && Math.random() < 0.5);
+  ): Promise<{ anime: ShikimoriAnime; source: 'planned' | 'ongoing'; isAlsoPlanned?: boolean } | null> {
+    const exclusion = await this.getUserExclusionData();
 
-    if (preferPlanned && userId) {
-      try {
-        const randomPage = Math.floor(Math.random() * 20) + 1;
-        const plannedIds = await this.getUserPlannedAnimeIds(50, randomPage);
-        const candidates = plannedIds.filter((id) => !excludeIds.includes(id));
-        const pool = candidates.length > 0 ? candidates : plannedIds;
-        if (pool.length > 0) {
-          const randomId = pool[Math.floor(Math.random() * pool.length)];
-          const anime = await this.getAnimeById(randomId);
-          if (anime) {
-            return { anime, source: 'planned' };
-          }
-        }
-      } catch (err: any) {
-        console.warn('[Shikimori] Failed to fetch planned recommendation:', err.message);
-      }
+    // 1. If strictly 'planned'
+    if (category === 'planned') {
+      return this.getRandomPlannedRecommendation(exclusion, excludeIds);
     }
 
-    try {
-      const randomPage = Math.floor(Math.random() * 3) + 1;
-      const ongoings = await this.getOngoingAnime(20, randomPage);
-      const candidates = ongoings.filter((a) => !excludeIds.includes(Number(a.id)));
-      const pool = candidates.length > 0 ? candidates : ongoings;
-      if (pool.length > 0) {
-        const picked = pool[Math.floor(Math.random() * pool.length)];
-        const fullAnime = picked.description ? picked : (await this.getAnimeById(picked.id)) || picked;
-        return { anime: fullAnime, source: 'ongoing' };
-      }
-    } catch (err: any) {
-      console.error('[Shikimori] Failed to fetch ongoing recommendation:', err.message);
+    // 2. If strictly 'ongoing'
+    if (category === 'ongoing') {
+      return this.getRandomOngoingRecommendation(exclusion, excludeIds);
     }
 
-    // Ultimate fallback if GraphQL/rates failed
-    try {
-      const searchResults = await this.searchAnime('', 20);
-      if (searchResults.length > 0) {
-        const picked = searchResults[Math.floor(Math.random() * searchResults.length)];
-        const anime = await this.getAnimeById(picked.id);
-        if (anime) return { anime, source: 'ongoing' };
-      }
-    } catch {}
-
-    return null;
+    // 3. If 'all' (randomly balance between unstarted planned and ongoing)
+    const preferPlanned = Math.random() < 0.5;
+    if (preferPlanned) {
+      const planned = await this.getRandomPlannedRecommendation(exclusion, excludeIds);
+      if (planned) return planned;
+      return this.getRandomOngoingRecommendation(exclusion, excludeIds);
+    } else {
+      const ongoing = await this.getRandomOngoingRecommendation(exclusion, excludeIds);
+      if (ongoing) return ongoing;
+      return this.getRandomPlannedRecommendation(exclusion, excludeIds);
+    }
   }
 
   async updateUserRate(rate: UserRateInput): Promise<any> {
+    this.invalidateExclusionCache();
     const userId = process.env.SHIKIMORI_USER_ID;
     if (!userId) throw new Error('SHIKIMORI_USER_ID is missing in .env');
 

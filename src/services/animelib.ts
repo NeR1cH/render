@@ -44,11 +44,13 @@ export const ANIMELIB_WEB_URL = (process.env.ANIMELIB_WEB_URL || 'https://animel
 export class AnimeLibService {
   private client: AxiosInstance;
   private readonly baseUrl = process.env.ANIMELIB_API_URL || 'https://hapi.hentaicdn.org/api';
+  private watchingCache: { items: AnimeLibBookmarkItem[]; timestamp: number } | null = null;
+  private readonly CACHE_TTL_MS = 45000; // 45 seconds cache to prevent spamming AnimeLib API
 
   constructor() {
     this.client = axios.create({
       baseURL: this.baseUrl,
-      timeout: 15000,
+      timeout: 25000,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
@@ -57,6 +59,10 @@ export class AnimeLibService {
         'Origin': ANIMELIB_WEB_URL,
       },
     });
+  }
+
+  invalidateWatchingCache(): void {
+    this.watchingCache = null;
   }
 
   private getAuthHeaders(): Record<string, string> {
@@ -88,7 +94,11 @@ export class AnimeLibService {
       .trim();
   }
 
-  async getAllWatching(): Promise<AnimeLibBookmarkItem[]> {
+  async getAllWatching(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
+    if (!forceRefresh && this.watchingCache && Date.now() - this.watchingCache.timestamp < this.CACHE_TTL_MS) {
+      return this.watchingCache.items;
+    }
+
     const headers = this.getAuthHeaders();
     if (Object.keys(headers).length === 0) {
       console.warn('[AnimeLib] ANIMELIB_COOKIE is empty. Skipping bookmarks check.');
@@ -98,7 +108,7 @@ export class AnimeLibService {
     const userId = process.env.ANIMELIB_USER_ID || '9024582';
     const requestHeaders = {
       ...headers,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
       'Accept': 'application/json, text/plain, */*',
       'Referer': 'https://animelib.org/',
       'Origin': 'https://animelib.org',
@@ -156,7 +166,26 @@ export class AnimeLibService {
         console.warn('[AnimeLib] Could not batch sync bookmarks to local DB:', dbError?.message);
       }
 
+      this.watchingCache = { items: result, timestamp: Date.now() };
       return result;
+    };
+
+    const getLocalDbFallback = (): AnimeLibBookmarkItem[] => {
+      try {
+        const cached = dbService.getAllSyncItems('watching');
+        if (cached && cached.length > 0) {
+          console.log(`[AnimeLib] Using ${cached.length} cached watching titles from local SQLite.`);
+          return cached.map((c) => ({
+            media_id: c.media_id,
+            slug_url: String(c.media_id),
+            name: c.title,
+            rus_name: c.rus_title || undefined,
+            current_progress_number: c.last_tracked_episode,
+            last_item_number: c.last_tracked_episode,
+          }));
+        }
+      } catch {}
+      return [];
     };
 
     try {
@@ -197,7 +226,7 @@ export class AnimeLibService {
         return transformItems(items);
       } catch (fallbackError: any) {
         console.error('[AnimeLib] Both endpoints failed:', fallbackError?.response?.status, fallbackError?.message);
-        return [];
+        return getLocalDbFallback();
       }
     }
   }

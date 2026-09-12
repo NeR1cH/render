@@ -766,7 +766,7 @@ async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned
       return ctx.reply('Не удалось найти подходящий тайтл. Попробуйте нажать кнопку ещё раз.');
     }
 
-    const { anime, source } = result;
+    const { anime, source, isAlsoPlanned } = result;
 
     // Track recently shown to prevent repeats (keep last 40)
     recentlyRecommendedIds.add(Number(anime.id));
@@ -784,10 +784,14 @@ async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned
       cardStyle: 'full',
     });
 
-    const sourceHeader =
-      source === 'planned'
-        ? '📌 <b>Рекомендация из ваших «В планах» (Shikimori):</b>'
-        : '🔥 <b>Горячий онгоинг сезона:</b>';
+    let sourceHeader = '';
+    if (source === 'planned') {
+      sourceHeader = '📌 <b>Рекомендация из ваших «В планах» (Shikimori):</b>\n<i>(Тайтл из вашего списка ожидания, который вы ещё не начали)</i>';
+    } else {
+      sourceHeader = isAlsoPlanned
+        ? '🔥 <b>Горячий онгоинг сезона:</b>\n<i>(💡 Этот онгоинг также есть в вашем списке «В планах»)</i>'
+        : '🔥 <b>Горячий онгоинг сезона:</b>\n<i>(Свежий тайтл текущего сезона)</i>';
+    }
 
     const cleanSearchQuery = encodeURIComponent(anime.russian || anime.name);
     const kb = new InlineKeyboard()
