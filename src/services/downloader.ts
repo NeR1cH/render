@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { dbService, DownloadQueueRecord } from '../db/database';
@@ -53,6 +54,26 @@ async function sendTelegramUpdate(chatId?: string, messageId?: number, text?: st
   }
 }
 
+function getEffectiveHeaders(videoUrl: string, streamHeaders?: Record<string, string>): Record<string, string> {
+  const userAgent =
+    streamHeaders?.['User-Agent'] ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+
+  const isKodik = videoUrl.includes('kodik') || videoUrl.includes('solodcdn');
+  const defaultReferer = isKodik ? 'https://kodikplayer.com/' : 'https://animelib.org/';
+  const defaultOrigin = isKodik ? 'https://kodikplayer.com' : 'https://animelib.org';
+
+  const referer = streamHeaders?.['Referer'] || defaultReferer;
+  const origin = streamHeaders?.['Origin'] || defaultOrigin;
+
+  return {
+    'User-Agent': userAgent,
+    'Referer': referer,
+    'Origin': origin,
+    ...(streamHeaders || {}),
+  };
+}
+
 export class DownloaderService {
   private isProcessing: boolean = false;
   private readonly downloadsDir = path.resolve(process.cwd(), 'downloads');
@@ -102,7 +123,202 @@ export class DownloaderService {
   }
 
   /**
-   * Скачивание отдельной задачи через FFmpeg (HLS .m3u8 -> MP4 с ремуксингом)
+   * Скачивание прямого видеофайла (.mp4) через HTTP-стрим (axios -> fs.createWriteStream).
+   * Исключает падения внешнего бинарника FFmpeg на прямых видеофайлах и дает точнейший прогресс в байтах и процентах.
+   */
+  private async downloadTaskWithHttpStream(
+    task: DownloadQueueRecord,
+    videoUrl: string,
+    streamHeaders?: Record<string, string>
+  ): Promise<string> {
+    this.ensureDownloadsDir();
+
+    const stored = dbService.getSyncItemByMediaId(task.media_id);
+    const animeTitle = stored?.rus_title || stored?.title || `Тайтл #${task.media_id}`;
+
+    const safeVoiceover = (task.voiceover || 'default')
+      .replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, '_')
+      .substring(0, 30);
+
+    const filename = `anime_${task.media_id}_ep_${task.episode}_${safeVoiceover}.mp4`;
+    const relativeFilePath = path.join('downloads', filename);
+    const absoluteFilePath = path.join(this.downloadsDir, filename);
+
+    const effectiveHeaders = getEffectiveHeaders(videoUrl, streamHeaders);
+
+    console.log(`[Downloader HTTP] Начинаю прямое скачивание задачи #${task.id}...`);
+    console.log(`[Downloader HTTP] URL: ${videoUrl}`);
+    console.log(`[Downloader HTTP] Целевой файл: ${relativeFilePath}`);
+
+    // Стартовое оповещение в Telegram (0%)
+    if (task.telegram_chat_id && task.telegram_message_id) {
+      const initialText = [
+        '📥 <b>Скачивание серии началось...</b>',
+        '━━━━━━━━━━━━━━━━━━━━',
+        `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+        `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+        `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+        '',
+        `<b>[${renderProgressBar(0)}] 0%</b>`,
+        '⏳ <i>Установка прямого соединения с CDN AnimeLib...</i>',
+      ].join('\n');
+      sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, initialText).catch(() => {});
+    }
+
+    try {
+      const response = await axios.get(videoUrl, {
+        responseType: 'stream',
+        headers: effectiveHeaders,
+        maxRedirects: 5,
+        timeout: 45000,
+        validateStatus: (status) => status >= 200 && status < 400,
+      });
+
+      const rawContentLength = response.headers['content-length'];
+      const totalBytes = typeof rawContentLength === 'number'
+        ? rawContentLength
+        : parseInt(String(rawContentLength || '0'), 10);
+      let downloadedBytes = 0;
+      let lastUpdatedProgress = 0;
+      let lastReportedStep = 0;
+      let lastUpdateTime = Date.now();
+      let speedBytesPerSec = 0;
+      let lastSpeedMeasurementTime = Date.now();
+      let downloadedSinceLastMeasurement = 0;
+
+      const writer = fs.createWriteStream(absoluteFilePath);
+
+      return new Promise<string>((resolve, reject) => {
+        response.data.on('data', (chunk: Buffer) => {
+          downloadedBytes += chunk.length;
+          downloadedSinceLastMeasurement += chunk.length;
+
+          const now = Date.now();
+          const timeDiff = now - lastSpeedMeasurementTime;
+          if (timeDiff >= 1000) {
+            speedBytesPerSec = (downloadedSinceLastMeasurement / timeDiff) * 1000;
+            downloadedSinceLastMeasurement = 0;
+            lastSpeedMeasurementTime = now;
+          }
+
+          let percent = totalBytes > 0 ? Math.floor((downloadedBytes / totalBytes) * 100) : 0;
+          if (percent > 99) percent = 99;
+
+          // Обновляем статус в базе при шаге от 5% или раз в 2.5 секунды
+          if (
+            (percent >= lastUpdatedProgress + 5 || now - lastUpdateTime > 2500) &&
+            percent > lastUpdatedProgress
+          ) {
+            lastUpdatedProgress = percent;
+            lastUpdateTime = now;
+            dbService.updateDownloadStatus(task.id, 'downloading', percent);
+            const dlMb = (downloadedBytes / (1024 * 1024)).toFixed(1);
+            const totalMb = totalBytes > 0 ? (totalBytes / (1024 * 1024)).toFixed(1) : '?';
+            const speedMb = (speedBytesPerSec / (1024 * 1024)).toFixed(1);
+            console.log(
+              `[Downloader HTTP] Задача #${task.id} прогресс: ${percent}% (${dlMb}/${totalMb} МБ, скорость: ${speedMb} МБ/с)`
+            );
+          }
+
+          // Интерактивное обновление шкалы в Telegram каждые 20% (20, 40, 60, 80)
+          const currentStep = Math.floor(percent / 20) * 20;
+          if (currentStep > lastReportedStep && currentStep <= 80 && currentStep > 0) {
+            lastReportedStep = currentStep;
+            if (task.telegram_chat_id && task.telegram_message_id) {
+              const bar = renderProgressBar(currentStep);
+              const dlMb = (downloadedBytes / (1024 * 1024)).toFixed(1);
+              const totalMb = totalBytes > 0 ? (totalBytes / (1024 * 1024)).toFixed(1) : '?';
+              const speedMb = (speedBytesPerSec / (1024 * 1024)).toFixed(1);
+
+              const progressText = [
+                '📥 <b>Скачивание серии...</b>',
+                '━━━━━━━━━━━━━━━━━━━━',
+                `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+                `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+                `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+                '',
+                `<b>[${bar}] ${currentStep}%</b>`,
+                `📦 <b>Загружено:</b> <code>${dlMb} / ${totalMb} МБ</code> | 🚀 <b>Скорость:</b> <code>${speedMb} МБ/с</code>`,
+              ].join('\n');
+
+              sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, progressText).catch(() => {});
+            }
+          }
+        });
+
+        response.data.on('error', (err: any) => {
+          writer.close();
+          try {
+            if (fs.existsSync(absoluteFilePath)) fs.unlinkSync(absoluteFilePath);
+          } catch {}
+          reject(err);
+        });
+
+        writer.on('error', (err: any) => {
+          try {
+            if (fs.existsSync(absoluteFilePath)) fs.unlinkSync(absoluteFilePath);
+          } catch {}
+          reject(err);
+        });
+
+        writer.on('finish', () => {
+          console.log(`[Downloader HTTP] ✅ Загрузка задачи #${task.id} успешно завершена: ${relativeFilePath}`);
+          dbService.updateDownloadStatus(task.id, 'completed', 100, relativeFilePath);
+
+          // Расчет итогового размера файла
+          let fileSizeStr = 'N/A';
+          try {
+            const stats = fs.statSync(absoluteFilePath);
+            fileSizeStr = `${(stats.size / (1024 * 1024)).toFixed(1)} МБ`;
+          } catch {}
+
+          // Финальное сообщение в Telegram с метаданными
+          if (task.telegram_chat_id && task.telegram_message_id) {
+            const successText = [
+              '✅ <b>Серия успешно скачана!</b>',
+              '━━━━━━━━━━━━━━━━━━━━',
+              `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+              `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+              `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+              `📁 <b>Файл:</b> <code>${filename}</code>`,
+              `📦 <b>Размер:</b> <code>${fileSizeStr}</code>`,
+              '',
+              '🎉 <i>Файл сохранен в локальное хранилище и готов к просмотру!</i>',
+            ].join('\n');
+
+            sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, successText).catch(() => {});
+          }
+
+          resolve(relativeFilePath);
+        });
+
+        response.data.pipe(writer);
+      });
+    } catch (httpErr: any) {
+      const errMsg = httpErr?.message || 'Ошибка HTTP загрузки';
+      console.error(`[Downloader HTTP] ❌ Ошибка для задачи #${task.id}:`, errMsg);
+      try {
+        if (fs.existsSync(absoluteFilePath)) fs.unlinkSync(absoluteFilePath);
+      } catch {}
+      dbService.updateDownloadStatus(task.id, 'error', 0);
+
+      if (task.telegram_chat_id && task.telegram_message_id) {
+        const errorText = [
+          '❌ <b>Ошибка при скачивании серии!</b>',
+          '━━━━━━━━━━━━━━━━━━━━',
+          `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+          `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+          `⚠️ <i>${escapeHtml(errMsg)}</i>`,
+        ].join('\n');
+        sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, errorText).catch(() => {});
+      }
+
+      throw new Error(`HTTP stream error: ${errMsg}`);
+    }
+  }
+
+  /**
+   * Скачивание HLS манифестов (.m3u8) через FFmpeg с ремуксингом в MP4
    */
   private async downloadTaskWithFFmpeg(
     task: DownloadQueueRecord,
@@ -122,26 +338,9 @@ export class DownloaderService {
     const relativeFilePath = path.join('downloads', filename);
     const absoluteFilePath = path.join(this.downloadsDir, filename);
 
-    // Подготовка заголовков для обхода 403 Forbidden от CDN (AnimeLib, Kodik и др.)
-    const userAgent =
-      streamHeaders?.['User-Agent'] ||
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+    const effectiveHeaders = getEffectiveHeaders(videoUrl, streamHeaders);
 
-    const isKodik = videoUrl.includes('kodik') || videoUrl.includes('solodcdn');
-    const defaultReferer = isKodik ? 'https://kodikplayer.com/' : 'https://animelib.org/';
-    const defaultOrigin = isKodik ? 'https://kodikplayer.com' : 'https://animelib.org';
-
-    const referer = streamHeaders?.['Referer'] || defaultReferer;
-    const origin = streamHeaders?.['Origin'] || defaultOrigin;
-
-    const effectiveHeaders: Record<string, string> = {
-      'User-Agent': userAgent,
-      'Referer': referer,
-      'Origin': origin,
-      ...(streamHeaders || {}),
-    };
-
-    // Формируем строку заголовков для FFmpeg: "Header1: Val1\r\nHeader2: Val2\r\n"
+    // Заголовки для FFmpeg должны объединяться СТРОГО через \r\n и обязательно оканчиваться финальным \r\n
     const headersOption =
       Object.entries(effectiveHeaders)
         .map(([k, v]) => `${k}: ${v}`)
@@ -152,9 +351,9 @@ export class DownloaderService {
       let lastReportedStep = 0;
       let lastUpdateTime = 0;
 
-      console.log(`[Downloader] Начинаю загрузку задачи #${task.id}...`);
-      console.log(`[Downloader] URL потока: ${videoUrl}`);
-      console.log(`[Downloader] Целевой файл: ${relativeFilePath}`);
+      console.log(`[Downloader FFmpeg] Начинаю HLS загрузку задачи #${task.id}...`);
+      console.log(`[Downloader FFmpeg] URL потока: ${videoUrl}`);
+      console.log(`[Downloader FFmpeg] Целевой файл: ${relativeFilePath}`);
 
       // Стартовое оповещение в Telegram (0%)
       if (task.telegram_chat_id && task.telegram_message_id) {
@@ -166,31 +365,37 @@ export class DownloaderService {
           `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
           '',
           `<b>[${renderProgressBar(0)}] 0%</b>`,
-          '⏳ <i>Инициализация потока и буферизация FFmpeg...</i>',
+          '⏳ <i>Инициализация HLS потока и буферизация FFmpeg...</i>',
         ].join('\n');
         sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, initialText).catch(() => {});
+      }
+
+      // Настройка флагов FFmpeg:
+      // ВАЖНО: -bsf:a aac_adtstoasc добавляется ТОЛЬКО для .m3u8 (HLS)! Для прямых .mp4 он вызывает I/O error.
+      const outputOptions = [
+        '-c copy',
+        '-y',
+      ];
+      if (videoUrl.includes('.m3u8')) {
+        outputOptions.push('-bsf:a aac_adtstoasc');
       }
 
       const command = ffmpeg(videoUrl)
         .inputOptions([
           '-headers', headersOption,
         ])
-        .outputOptions([
-          '-c copy',
-          '-bsf:a aac_adtstoasc',
-          '-y',
-        ])
+        .outputOptions(outputOptions)
         .output(absoluteFilePath);
 
       command.on('start', (commandLine) => {
-        console.log(`[Downloader] FFmpeg запущен для задачи #${task.id}: ${commandLine}`);
+        console.log(`[Downloader FFmpeg] Запущен для задачи #${task.id}: ${commandLine}`);
       });
 
       command.on('progress', (progress) => {
         const now = Date.now();
         let percent = Math.floor(progress.percent || 0);
 
-        // Если HLS не отдает общую длительность, рассчитываем прогресс по таймкоду (из расчета серии ~24 мин = 1440 сек)
+        // Если HLS не отдает общую длительность, рассчитываем прогресс по таймкоду (серия ~24 мин = 1440 сек)
         if (percent <= 0 && progress.timemark) {
           try {
             const parts = progress.timemark.split(':');
@@ -212,7 +417,7 @@ export class DownloaderService {
           lastUpdateTime = now;
           dbService.updateDownloadStatus(task.id, 'downloading', percent);
           console.log(
-            `[Downloader] Задача #${task.id} прогресс: ${percent}% (время: ${progress.timemark || 'N/A'}, fps: ${progress.currentFps || 0})`
+            `[Downloader FFmpeg] Задача #${task.id} прогресс: ${percent}% (время: ${progress.timemark || 'N/A'}, fps: ${progress.currentFps || 0})`
           );
         }
 
@@ -247,7 +452,7 @@ export class DownloaderService {
       });
 
       command.on('end', () => {
-        console.log(`[Downloader] ✅ Загрузка задачи #${task.id} успешно завершена: ${relativeFilePath}`);
+        console.log(`[Downloader FFmpeg] ✅ Загрузка задачи #${task.id} успешно завершена: ${relativeFilePath}`);
         dbService.updateDownloadStatus(task.id, 'completed', 100, relativeFilePath);
 
         // Расчет итогового размера файла
@@ -279,9 +484,9 @@ export class DownloaderService {
 
       command.on('error', (err, stdout, stderr) => {
         const errMsg = err?.message || 'Неизвестная ошибка FFmpeg';
-        console.error(`[Downloader] ❌ Ошибка FFmpeg для задачи #${task.id}:`, errMsg);
+        console.error(`[Downloader FFmpeg] ❌ Ошибка FFmpeg для задачи #${task.id}:`, errMsg);
         if (stderr) {
-          console.error(`[Downloader] FFmpeg stderr:\n`, stderr.substring(0, 400));
+          console.error(`[Downloader FFmpeg] FFmpeg stderr:\n`, stderr.substring(0, 400));
         }
         dbService.updateDownloadStatus(task.id, 'error', 0);
 
@@ -361,8 +566,16 @@ export class DownloaderService {
             `[Downloader] Поток найден: [${videoLink.playerType}] Качество: ${videoLink.quality || 'Auto'}, Озвучка: ${videoLink.voiceover || 'N/A'}, Формат: ${videoLink.format}`
           );
 
-          // Запуск скачивания через FFmpeg с заголовками от резолвера
-          await this.downloadTaskWithFFmpeg(task, videoLink.url, videoLink.headers);
+          // Проверяем формат: HLS (.m3u8) или прямой MP4 файл
+          const isHls = videoLink.url.includes('.m3u8') || videoLink.format === 'm3u8';
+
+          if (isHls) {
+            // Для HLS плейлистов используем FFmpeg
+            await this.downloadTaskWithFFmpeg(task, videoLink.url, videoLink.headers);
+          } else {
+            // Для прямых видеофайлов (например .mp4 на видеосервере AnimeLib) скачиваем через HTTP Stream
+            await this.downloadTaskWithHttpStream(task, videoLink.url, videoLink.headers);
+          }
         } catch (taskErr: any) {
           console.error(`[Downloader] Ошибка при обработке задачи #${task.id}:`, taskErr?.message);
           dbService.updateDownloadStatus(task.id, 'error', 0);
@@ -377,4 +590,5 @@ export class DownloaderService {
 }
 
 export const downloaderService = new DownloaderService();
+
 

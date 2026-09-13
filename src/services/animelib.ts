@@ -23,6 +23,8 @@ export interface AnimeLibBookmarkItem {
   last_item_number?: number;
   poster?: string;
   folderStatus?: 'watching' | 'planned';
+  status_slug?: string;
+  is_subscribed?: boolean;
 }
 
 export interface AnimeLibEpisodeInfo {
@@ -496,22 +498,46 @@ export class AnimeLibService {
         media.items_count?.uploaded ??
         media.last_item_number;
 
+      // Колокольчик уведомлений
+      const hasNotification = Boolean(
+        item.subscribe ||
+        item.is_subscribed ||
+        item.subscription ||
+        item.has_notification ||
+        item.notification ||
+        media.subscribe ||
+        media.is_subscribed ||
+        media.has_notification ||
+        media.subscription
+      );
+
       // Анализ статуса тайтла (завершен ли релиз)
       const statusObj = media.status || {};
       const statusIdVal = Number(statusObj.id || media.status_id || 0);
-      const statusName = String(
-        statusObj.name || statusObj.label || statusObj.slug || media.status_name || ''
+      const statusSlug = String(
+        statusObj.slug || statusObj.name || statusObj.label || media.status_name || media.status || ''
       ).toLowerCase();
 
+      const isAnonsOrOngoing =
+        statusSlug.includes('anons') ||
+        statusSlug.includes('анонс') ||
+        statusSlug.includes('ongoing') ||
+        statusSlug.includes('онгоинг') ||
+        statusSlug.includes('выходит');
+
       // Исключаем тайтлы со статусом 'released'/'completed' (старые вышедшие тайтлы)
+      // ВАЖНО: Для folder === 'watching' тайтл ВСЕГДА имеет статус 'watching'!
       const isReleased =
-        statusIdVal === 1 ||
-        statusIdVal === 4 ||
-        statusName.includes('released') ||
-        statusName.includes('completed') ||
-        statusName.includes('завершен') ||
-        statusName.includes('вышел') ||
-        statusName.includes('выпущено');
+        folder === 'watching'
+          ? false
+          : (!isAnonsOrOngoing &&
+              (statusIdVal === 1 ||
+               statusIdVal === 4 ||
+               statusSlug.includes('released') ||
+               statusSlug.includes('completed') ||
+               statusSlug.includes('завершен') ||
+               statusSlug.includes('вышел') ||
+               statusSlug.includes('выпущено')));
 
       const entry: AnimeLibBookmarkItem = {
         media_id: mediaId,
@@ -522,19 +548,29 @@ export class AnimeLibService {
         last_item_number: parseEpisodeNumber(rawLastEp),
         poster: media.cover?.default || media.poster,
         folderStatus: folder,
+        status_slug: statusSlug,
+        is_subscribed: hasNotification,
       };
 
       toSync.push({
         media_id: entry.media_id,
         title: entry.name,
         rus_title: entry.rus_name,
-        status: isReleased ? 'completed' : folder,
+        status: folder === 'watching' ? 'watching' : (isReleased ? 'completed' : folder),
         last_tracked_episode: entry.current_progress_number || 0,
         latest_episode: entry.last_item_number || 0,
       });
 
       allResult.push(entry);
-      if (!isReleased) {
+
+      // Логика кнопки «Запланированное»:
+      // Не выгружать архивные завершённые релизы.
+      // Выводить только тайтлы со статусом 'anons' / 'ongoing' или с включённым колокольчиком уведомлений.
+      if (folder === 'planned') {
+        if (isAnonsOrOngoing || hasNotification) {
+          unreleasedResult.push(entry);
+        }
+      } else if (!isReleased) {
         unreleasedResult.push(entry);
       }
     }
@@ -595,7 +631,10 @@ export class AnimeLibService {
   }
 
   /**
-   * Получение реально доступных команд/студий озвучки конкретно для этого тайтла
+   * Получение реально доступных команд/студий озвучки конкретно для этого тайтла.
+   * Опрашивает ВСЕ вышедшие серии тайтла, собирает уникальные team.name
+   * (исключая субтитры translation_type.id !== 1) в единый Set<string>.
+   * Возвращает ПОЛНЫЙ отсортированный список всех озвучек, когда-либо выходивших для этого аниме на AnimeLib.
    */
   async getTitleVoiceovers(mediaId: number | string): Promise<string[]> {
     const id = typeof mediaId === 'string' ? parseInt(mediaId, 10) : mediaId;
@@ -607,6 +646,29 @@ export class AnimeLibService {
     };
 
     const studiosSet = new Set<string>();
+
+    const addPlayerStudio = (pl: any) => {
+      if (!pl) return;
+      // В AnimeLib translation_type.id === 1 это ОЗВУЧКА!
+      // translation_type.id !== 1 (например 2) — это субтитры
+      if (pl.translation_type && pl.translation_type.id !== 1) {
+        return;
+      }
+      const typeName = String(pl.translation_type?.name || pl.translation_type?.label || '').toLowerCase();
+      if (typeName.includes('субтит') || typeName.includes('sub')) {
+        return;
+      }
+
+      const teamName = pl.team?.name?.trim();
+      if (!teamName || teamName.length < 2) return;
+
+      const lower = teamName.toLowerCase();
+      if (lower.includes('субтит') || lower.includes('subtitle') || lower === 'оригинал' || lower === 'original') {
+        return;
+      }
+
+      studiosSet.add(teamName);
+    };
 
     try {
       let episodesData: any[] = [];
@@ -626,33 +688,51 @@ export class AnimeLibService {
       }
 
       if (Array.isArray(episodesData) && episodesData.length > 0) {
+        // 1. Проверяем наличие плееров или команд сразу в объектах эпизодов
         for (const ep of episodesData) {
-          const players = Array.isArray(ep.players) ? ep.players : [];
-          for (const pl of players) {
-            // Исключаем субтитры (translation_type.id === 1)
-            if (pl.translation_type?.id === 1) continue;
-            const teamName = pl.team?.name?.trim();
-            if (teamName && teamName.length > 1) {
-              studiosSet.add(teamName);
+          if (Array.isArray(ep.players) && ep.players.length > 0) {
+            for (const pl of ep.players) {
+              addPlayerStudio(pl);
+            }
+          }
+          if (Array.isArray(ep.teams)) {
+            for (const t of ep.teams) {
+              const tName = t.name?.trim();
+              if (tName && !tName.toLowerCase().includes('субтит') && !tName.toLowerCase().includes('subtitle')) {
+                studiosSet.add(tName);
+              }
             }
           }
         }
 
-        // Если в списке эпизодов команды не были указаны явно, проверим последний эпизод подробнее
-        if (studiosSet.size === 0) {
-          const lastEp = episodesData[episodesData.length - 1];
-          if (lastEp?.id) {
-            try {
-              const detailRes = await this.client.get(`/episodes/${lastEp.id}`, { headers: requestHeaders });
-              const detailPlayers = detailRes.data?.data?.players || detailRes.data?.players || [];
-              for (const pl of detailPlayers) {
-                if (pl.translation_type?.id === 1) continue;
-                const teamName = pl.team?.name?.trim();
-                if (teamName && teamName.length > 1) {
-                  studiosSet.add(teamName);
-                }
-              }
-            } catch {}
+        // 2. Опрашиваем ВСЕ эпизоды тайтла через /episodes/${ep.id}, чтобы не упустить
+        // студии, добавившиеся в последующих сериях (Ancord, Заговорщики, Fronda, DreamyVoice, Family Club и т.д.)
+        const episodesToQuery = episodesData.filter((ep: any) => ep?.id);
+        if (episodesToQuery.length > 0) {
+          const batchSize = 6;
+          for (let i = 0; i < episodesToQuery.length; i += batchSize) {
+            const batch = episodesToQuery.slice(i, i + batchSize);
+            await Promise.allSettled(
+              batch.map(async (ep: any) => {
+                try {
+                  const detailRes = await this.client.get(`/episodes/${ep.id}`, {
+                    headers: requestHeaders,
+                    timeout: 8000,
+                  });
+                  const detailPlayers = detailRes.data?.data?.players || detailRes.data?.players || [];
+                  for (const pl of detailPlayers) {
+                    addPlayerStudio(pl);
+                  }
+                  const detailTeams = detailRes.data?.data?.teams || detailRes.data?.teams || [];
+                  for (const t of detailTeams) {
+                    const tName = t.name?.trim();
+                    if (tName && !tName.toLowerCase().includes('субтит') && !tName.toLowerCase().includes('subtitle')) {
+                      studiosSet.add(tName);
+                    }
+                  }
+                } catch {}
+              })
+            );
           }
         }
       }
@@ -697,8 +777,11 @@ export class AnimeLibService {
 
         if (Array.isArray(ep.players)) {
           for (const pl of ep.players) {
-            // Отсекаем субтитры (translation_type.id === 1) и пустые имена
-            const isSub = pl.translation_type?.id === 1;
+            // Отсекаем субтитры (translation_type.id !== 1) и пустые имена
+            const isSub =
+              (pl.translation_type && pl.translation_type.id !== 1) ||
+              (pl.translation_type?.name && pl.translation_type.name.toLowerCase().includes('субтит')) ||
+              (pl.team?.name && (pl.team.name.toLowerCase().includes('субтит') || pl.team.name.toLowerCase().includes('subtitle')));
             const teamName = pl.team?.name?.trim();
             if (teamName && !isSub) {
               studiosSet.add(teamName);
@@ -887,11 +970,11 @@ export class AnimeLibService {
 
       const studiosSet = new Set<string>();
       for (const pl of players) {
-        // Отсекаем субтитры (translation_type.id === 1) и пустые имена
+        // Отсекаем субтитры (translation_type.id !== 1) и пустые имена
         const isSub =
-          pl.translation_type?.id === 1 ||
+          (pl.translation_type && pl.translation_type.id !== 1) ||
           (pl.translation_type?.name && pl.translation_type.name.toLowerCase().includes('субтит')) ||
-          (pl.team?.name && pl.team.name.toLowerCase().includes('subtitle'));
+          (pl.team?.name && (pl.team.name.toLowerCase().includes('субтит') || pl.team.name.toLowerCase().includes('subtitle')));
         const teamName = pl.team?.name?.trim();
         if (teamName && !isSub) {
           studiosSet.add(teamName);

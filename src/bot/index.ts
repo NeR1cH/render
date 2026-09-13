@@ -741,6 +741,27 @@ export async function showWatchingList(ctx: Context) {
     });
   }
 
+  // Актуализируем количество вышедших серий (устраняем рассинхроны вроде «8 из 7»)
+  await Promise.allSettled(
+    list.map(async (item) => {
+      try {
+        const eps = await animelibService.getAvailableEpisodes(item.media_id);
+        if (eps.length > 0) {
+          const actualMax = eps[eps.length - 1];
+          if (actualMax > (item.last_item_number || 0)) {
+            item.last_item_number = actualMax;
+            dbService.updateLatestEpisode(item.media_id, actualMax);
+          }
+        }
+      } catch {}
+      const cur = item.current_progress_number || 0;
+      if (cur > (item.last_item_number || 0)) {
+        item.last_item_number = cur;
+        dbService.updateLatestEpisode(item.media_id, cur);
+      }
+    })
+  );
+
   const lines = list.map((item, idx) => {
     const curEp = item.current_progress_number || 0;
     const maxEp = item.last_item_number && item.last_item_number > 0 ? item.last_item_number : '?';
@@ -748,7 +769,7 @@ export async function showWatchingList(ctx: Context) {
     const prefVo = dbService.getPreferredVoiceover(item.media_id) || stored?.preferred_voiceover;
     const voBadge = prefVo ? ` | 🎙 <b>${escapeHtml(prefVo)}</b>` : ' | 🎙 <i>(озвучка не выбрана)</i>';
     const note = stored?.custom_note ? `\n   📌 <i>«${escapeHtml(stored.custom_note)}»</i>` : '';
-    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>\n   └ Прогресс: <code>#${curEp}</code> из <code>#${maxEp}</code>${voBadge}${note}`;
+    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>\n   └ [Просмотрено: #${curEp} из #${maxEp} вышедших]${voBadge}${note}`;
   });
 
   const totalText = [
@@ -828,16 +849,17 @@ export async function showPlannedList(ctx: Context) {
 
   const lines = activeList.slice(0, 15).map((item, idx) => {
     const title = escapeHtml(item.rus_name || item.name);
+    const bell = item.is_subscribed ? ' 🔔' : '';
     const latest = item.last_item_number && item.last_item_number > 0
       ? ` (вышло: <code>#${item.last_item_number}</code>)`
       : ' <i>(анонс)</i>';
-    return `${idx + 1}. <b>${title}</b>${latest}`;
+    return `${idx + 1}. <b>${title}</b>${bell}${latest}`;
   });
 
   const totalText = [
     `⏳ <b>Список «Запланированное»</b> [Ожидается: ${activeList.length} из ${totalCount} в планах]`,
     '━━━━━━━━━━━━━━━━━━━━',
-    '<i>Тайтлы, ожидающие просмотра или выхода новых серий (архивные завершённые релизы исключены):</i>',
+    '<i>Тайтлы, ожидающие просмотра или выхода новых серий (статус «анонс» / «онгоинг» или включён колокольчик 🔔):</i>',
     '',
     lines.join('\n\n'),
     activeList.length > 15 ? `\n<i>...и ещё ${activeList.length - 15} активных тайтлов</i>` : '',
@@ -1419,17 +1441,59 @@ bot.callbackQuery('noop_dl', (ctx) =>
 // ==========================================
 
 export async function showDownloadTitleSelection(ctx: Context) {
-  let watchingItems = dbService.getAllSyncItems('watching');
+  // Загружаем актуальный список из AnimeLib и локальной базы
+  let watchingLib: any[] = [];
+  try {
+    watchingLib = await animelibService.getAllWatching();
+  } catch {}
 
-  // If local DB is empty or missing titles, attempt to fetch from AnimeLib
-  if (watchingItems.length === 0) {
+  const watchingDb = dbService.getAllSyncItems('watching') || [];
+
+  // Объединяем оба источника, чтобы ни один из 5 тайтлов не пропал
+  const watchingMap = new Map<number, {
+    media_id: number;
+    title: string;
+    rus_title?: string;
+    last_tracked_episode: number;
+    latest_episode: number;
+  }>();
+
+  for (const item of watchingDb) {
+    watchingMap.set(item.media_id, {
+      media_id: item.media_id,
+      title: item.title,
+      rus_title: item.rus_title,
+      last_tracked_episode: item.last_tracked_episode || 0,
+      latest_episode: item.latest_episode || 0,
+    });
+  }
+
+  for (const item of watchingLib) {
+    const existing = watchingMap.get(item.media_id);
+    const lastTracked = Math.max(existing?.last_tracked_episode || 0, item.current_progress_number || 0);
+    const latestEp = Math.max(existing?.latest_episode || 0, item.last_item_number || 0);
+    watchingMap.set(item.media_id, {
+      media_id: item.media_id,
+      title: item.name || existing?.title || String(item.media_id),
+      rus_title: item.rus_name || existing?.rus_title,
+      last_tracked_episode: lastTracked,
+      latest_episode: latestEp,
+    });
+
+    // Гарантируем корректный статус 'watching' в базе данных
     try {
-      const bookmarks = await animelibService.getAllWatching();
-      if (bookmarks && bookmarks.length > 0) {
-        watchingItems = dbService.getAllSyncItems('watching');
-      }
+      dbService.upsertSyncItem({
+        media_id: item.media_id,
+        title: item.name,
+        rus_title: item.rus_name,
+        status: 'watching',
+        last_tracked_episode: lastTracked,
+        latest_episode: latestEp,
+      });
     } catch {}
   }
+
+  const watchingItems = Array.from(watchingMap.values());
 
   if (!watchingItems || watchingItems.length === 0) {
     const emptyMsg = [
@@ -1449,11 +1513,31 @@ export async function showDownloadTitleSelection(ctx: Context) {
     return ctx.reply(emptyMsg, { parse_mode: 'HTML' });
   }
 
+  // Актуализируем количество вышедших серий в реальном времени (фикс «8 из 7»)
+  await Promise.allSettled(
+    watchingItems.map(async (item) => {
+      try {
+        const eps = await animelibService.getAvailableEpisodes(item.media_id);
+        if (eps.length > 0) {
+          const actualMax = eps[eps.length - 1];
+          if (actualMax > item.latest_episode) {
+            item.latest_episode = actualMax;
+            dbService.updateLatestEpisode(item.media_id, actualMax);
+          }
+        }
+      } catch {}
+      if (item.last_tracked_episode > item.latest_episode) {
+        item.latest_episode = item.last_tracked_episode;
+        dbService.updateLatestEpisode(item.media_id, item.latest_episode);
+      }
+    })
+  );
+
   const lines = watchingItems.map((item, idx) => {
     const title = escapeHtml(item.rus_title || item.title);
     const x = item.last_tracked_episode || 0;
     const y = item.latest_episode && item.latest_episode > 0 ? item.latest_episode : '?';
-    return `${idx + 1}. «<b>${title}</b>» [Просмотрено: #${x} из #${y}]`;
+    return `${idx + 1}. «<b>${title}</b>» [Просмотрено: #${x} из #${y} вышедших]`;
   });
 
   const text = [
