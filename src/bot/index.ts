@@ -19,6 +19,10 @@ export const bot = new Bot(BOT_TOKEN || '000000000:AAFakeTokenForOfflineMode');
 
 export { POPULAR_STUDIOS };
 
+// In-memory cache for studio voiceovers per title and per episode to guarantee <64 byte callback_data
+export const titleVoiceoversCache = new Map<number, string[]>();
+export const episodeVoiceoversCache = new Map<string, string[]>();
+
 // ==========================================
 // Persistent Bottom Menu (Reply Keyboard)
 // ==========================================
@@ -1467,7 +1471,7 @@ export async function showDownloadTitleSelection(ctx: Context) {
     const item = watchingItems[i];
     const name = item.rus_title || item.title;
     const shortTitle = name.length > 30 ? name.slice(0, 28) + '…' : name;
-    kb.text(`${i + 1}. ${shortTitle}`, `dl_title:${item.media_id}`).row();
+    kb.text(`${i + 1}. ${shortTitle}`, `dl_t:${item.media_id}`).row();
   }
   kb.text('❌ Закрыть меню', 'close_menu');
 
@@ -1516,7 +1520,7 @@ export async function showEpisodeSelection(ctx: Context, mediaId: number) {
     } else if (ep === lastTracked + 1) {
       badge = `▶️ #${ep}`;
     }
-    kb.text(badge, `dl_ep:${mediaId}:${ep}`);
+    kb.text(badge, `dl_e:${mediaId}:${ep}`);
     col++;
     if (col % 4 === 0) {
       kb.row();
@@ -1545,6 +1549,9 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
     studios = POPULAR_STUDIOS.slice(0, 6);
   }
 
+  // Кэшируем студии серии для безопасного <64 байт callback_data
+  episodeVoiceoversCache.set(`${mediaId}:${ep}`, studios);
+
   const kb = new InlineKeyboard();
   for (let i = 0; i < studios.length; i++) {
     const studio = studios[i];
@@ -1553,8 +1560,7 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
       (studio.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(studio.toLowerCase()))
     );
     const label = isPreferred ? `⭐️ ${studio}` : studio;
-    const safeStudio = studio.length > 35 ? studio.slice(0, 35) : studio;
-    kb.text(label, `dl_run:${mediaId}:${ep}:${safeStudio}`);
+    kb.text(label, `dl_r:${mediaId}:${ep}:${i}`);
     if (i % 2 === 1) {
       kb.row();
     }
@@ -1562,7 +1568,7 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
   if (studios.length % 2 !== 0) {
     kb.row();
   }
-  kb.text('⬅️ Назад', `dl_back_eps:${mediaId}`)
+  kb.text('⬅️ Назад', `dl_t:${mediaId}`)
     .text('❌ Закрыть меню', 'close_menu');
 
   const prefNotice = preferredVo ? `\n⭐️ <i>Предпочитаемая озвучка: <b>${escapeHtml(preferredVo)}</b></i>` : '';
@@ -1583,14 +1589,14 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
 }
 
 // Callback: Choose Title -> Show Episodes (or Back to Episodes)
-bot.callbackQuery(/^(?:dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
+bot.callbackQuery(/^(?:dl_t|dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   await ctx.answerCallbackQuery();
   await showEpisodeSelection(ctx, mediaId);
 });
 
 // Callback: Choose Episode -> Show Voiceovers (or auto-select preferred voiceover)
-bot.callbackQuery(/^dl_ep:(\d+):([\d.]+)$/, async (ctx) => {
+bot.callbackQuery(/^(?:dl_e|dl_ep):(\d+):([\d.]+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   const ep = parseFloat(ctx.match[2]);
 
@@ -1622,7 +1628,7 @@ bot.callbackQuery(/^dl_ep:(\d+):([\d.]+)$/, async (ctx) => {
       ].join('\n');
 
       const kb = new InlineKeyboard()
-        .text('📺 Другая серия этого тайтла', `dl_title:${mediaId}`)
+        .text('📺 Другая серия этого тайтла', `dl_t:${mediaId}`)
         .row()
         .text('📋 Выбрать другой тайтл', 'dl_back_titles')
         .text('📺 Мой список', 'list_watching');
@@ -1651,10 +1657,25 @@ bot.callbackQuery(/^dl_ep:(\d+):([\d.]+)$/, async (ctx) => {
 });
 
 // Callback: Choose Voiceover -> Run Download
-bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
+bot.callbackQuery(/^(?:dl_r|dl_run):(\d+):([\d.]+):(.+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   const ep = parseFloat(ctx.match[2]);
-  const voiceover = ctx.match[3].trim();
+  const rawVo = ctx.match[3].trim();
+
+  let voiceover: string;
+  if (/^\d+$/.test(rawVo)) {
+    const idx = parseInt(rawVo, 10);
+    const key = `${mediaId}:${ep}`;
+    let studios = episodeVoiceoversCache.get(key);
+    if (!studios || !studios[idx]) {
+      studios = await animelibService.getEpisodeStudios(mediaId, ep);
+      if (studios.length === 0) studios = POPULAR_STUDIOS;
+      episodeVoiceoversCache.set(key, studios);
+    }
+    voiceover = studios[idx] || POPULAR_STUDIOS[idx] || 'AniLibria';
+  } else {
+    voiceover = rawVo;
+  }
 
   await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} поставлена в очередь!` });
 
@@ -1672,7 +1693,7 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
   ].join('\n');
 
   const kb = new InlineKeyboard()
-    .text('📺 Другая серия этого тайтла', `dl_title:${mediaId}`)
+    .text('📺 Другая серия этого тайтла', `dl_t:${mediaId}`)
     .row()
     .text('📋 Выбрать другой тайтл', 'dl_back_titles')
     .text('📺 Мой список', 'list_watching');
@@ -1698,7 +1719,7 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
 // ==========================================
 
 // Setup Voiceover for Title: Fetch actual studios from AnimeLib
-bot.callbackQuery(/^setup_vo:(\d+)$/, async (ctx) => {
+bot.callbackQuery(/^(?:setup_vo|svo_m):(\d+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   await ctx.answerCallbackQuery({ text: 'Запрашиваю студии озвучки на AnimeLib...' });
 
@@ -1714,18 +1735,21 @@ bot.callbackQuery(/^setup_vo:(\d+)$/, async (ctx) => {
     studios = POPULAR_STUDIOS;
   }
 
+  // Сохраняем в кэш для короткого callback_data (svo:mediaId:index) < 64 байт
+  titleVoiceoversCache.set(mediaId, studios);
+
   const kb = new InlineKeyboard();
   for (let i = 0; i < studios.length; i++) {
     const s = studios[i];
     const isSelected = currentPref && (s.toLowerCase() === currentPref.toLowerCase());
     const label = `${isSelected ? '✅ ' : '▫️ '}${s}`;
-    kb.text(label, `set_vo:${mediaId}:${encodeURIComponent(s)}`);
+    kb.text(label, `svo:${mediaId}:${i}`);
     if (i % 2 === 1) kb.row();
   }
   if (studios.length % 2 !== 0) kb.row();
 
   if (currentPref) {
-    kb.text('🔄 Сбросить выбор озвучки', `reset_vo:${mediaId}`).row();
+    kb.text('🔄 Сбросить выбор озвучки', `rvo:${mediaId}`).row();
   }
 
   kb.text('⬅️ Назад в «Смотрю»', 'list_watching')
@@ -1752,10 +1776,29 @@ bot.callbackQuery(/^setup_vo:(\d+)$/, async (ctx) => {
   }
 });
 
-// Save Selected Voiceover for Title
-bot.callbackQuery(/^set_vo:(\d+):(.+)$/, async (ctx) => {
+// Save Selected Voiceover for Title: svo:<media_id>:<index>
+bot.callbackQuery(/^(?:svo|set_vo):(\d+):(.+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
-  const studio = decodeURIComponent(ctx.match[2]).trim();
+  const param = ctx.match[2].trim();
+
+  let studio: string;
+  if (/^\d+$/.test(param)) {
+    const studioIdx = parseInt(param, 10);
+    let studios = titleVoiceoversCache.get(mediaId);
+    if (!studios || !studios[studioIdx]) {
+      studios = await animelibService.getTitleVoiceovers(mediaId);
+      if (!studios || studios.length === 0) {
+        studios = await animelibService.getEpisodeStudios(mediaId, 1);
+      }
+      if (!studios || studios.length === 0) {
+        studios = POPULAR_STUDIOS;
+      }
+      titleVoiceoversCache.set(mediaId, studios);
+    }
+    studio = studios[studioIdx] || POPULAR_STUDIOS[studioIdx] || 'AniLibria';
+  } else {
+    studio = decodeURIComponent(param).trim();
+  }
 
   dbService.setPreferredVoiceover(mediaId, studio);
   await ctx.answerCallbackQuery({ text: `✅ Озвучка сохранена: ${studio}` });
@@ -1773,7 +1816,7 @@ bot.callbackQuery(/^set_vo:(\d+):(.+)$/, async (ctx) => {
   ].join('\n');
 
   const kb = new InlineKeyboard()
-    .text('📥 Скачать серию', `dl_title:${mediaId}`)
+    .text('📥 Скачать серию', `dl_t:${mediaId}`)
     .text('🎙 Сменить озвучку', `setup_vo:${mediaId}`)
     .row()
     .text('📋 Мой список («Смотрю»)', 'list_watching')
@@ -1786,8 +1829,8 @@ bot.callbackQuery(/^set_vo:(\d+):(.+)$/, async (ctx) => {
   }
 });
 
-// Reset Voiceover for Title
-bot.callbackQuery(/^reset_vo:(\d+)$/, async (ctx) => {
+// Reset Voiceover for Title: rvo:<media_id>
+bot.callbackQuery(/^(?:rvo|reset_vo):(\d+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   dbService.setPreferredVoiceover(mediaId, '');
   await ctx.answerCallbackQuery({ text: 'Озвучка сброшена' });
@@ -1797,11 +1840,12 @@ bot.callbackQuery(/^reset_vo:(\d+)$/, async (ctx) => {
 
   let studios = await animelibService.getTitleVoiceovers(mediaId);
   if (!studios || studios.length === 0) studios = POPULAR_STUDIOS;
+  titleVoiceoversCache.set(mediaId, studios);
 
   const kb = new InlineKeyboard();
   for (let i = 0; i < studios.length; i++) {
     const s = studios[i];
-    kb.text(`▫️ ${s}`, `set_vo:${mediaId}:${encodeURIComponent(s)}`);
+    kb.text(`▫️ ${s}`, `svo:${mediaId}:${i}`);
     if (i % 2 === 1) kb.row();
   }
   if (studios.length % 2 !== 0) kb.row();
@@ -1867,7 +1911,7 @@ bot.callbackQuery('settings_voiceovers', async (ctx) => {
   POPULAR_STUDIOS.forEach((studio, idx) => {
     const isSelected = favorites.includes(studio);
     const label = `${isSelected ? '✅' : '▫️'} ${studio}`;
-    kb.text(label, `toggle_voice:${studio}`);
+    kb.text(label, `tvo:${idx}`);
     if (idx % 2 === 1) kb.row();
   });
 
@@ -1879,9 +1923,17 @@ bot.callbackQuery('settings_voiceovers', async (ctx) => {
   });
 });
 
-bot.callbackQuery(/^toggle_voice:(.+)$/, async (ctx) => {
+bot.callbackQuery(/^(?:tvo|toggle_voice):(.+)$/, async (ctx) => {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
-  const studio = ctx.match[1];
+  const param = ctx.match[1];
+  let studio: string;
+  if (/^\d+$/.test(param)) {
+    const idx = parseInt(param, 10);
+    studio = POPULAR_STUDIOS[idx] || param;
+  } else {
+    studio = param;
+  }
+
   dbService.toggleFavoriteVoiceover(userId, studio);
   await ctx.answerCallbackQuery({ text: `Обновлено: ${studio}` });
 
@@ -1896,7 +1948,7 @@ bot.callbackQuery(/^toggle_voice:(.+)$/, async (ctx) => {
   POPULAR_STUDIOS.forEach((s, idx) => {
     const isSelected = favorites.includes(s);
     const label = `${isSelected ? '✅' : '▫️'} ${s}`;
-    kb.text(label, `toggle_voice:${s}`);
+    kb.text(label, `tvo:${idx}`);
     if (idx % 2 === 1) kb.row();
   });
   kb.row().text('⬅️ Назад', 'open_settings').text('❌ Закрыть меню', 'close_menu');
