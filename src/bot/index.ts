@@ -35,16 +35,14 @@ export const POPULAR_STUDIOS = [
 // ==========================================
 export function getMainMenuKeyboard(): Keyboard {
   return new Keyboard()
-    .text('🔄 Проверить серии')
-    .text('📺 Мой список')
+    .text('🔍 Проверить обновления')
+    .text('📥 Скачать серию')
     .row()
-    .text('📥 Скачать')
-    .text('📅 Календарь')
+    .text('📋 Мой список («Смотрю»)')
+    .text('⏳ Запланированное')
     .row()
-    .text('🎲 Что глянуть?')
-    .text('👤 Профиль')
-    .row()
-    .text('⚙️ Настройки')
+    .text('📊 Статистика медиатеки')
+    .text('⚙️ Настройки и озвучки')
     .resized()
     .persistent();
 }
@@ -194,25 +192,31 @@ export function buildAnimeCardKeyboard(item: {
   const torrentQuery = encodeURIComponent(`${item.title}${searchQuality}`);
   const rutrackerUrl = `https://rutracker.org/forum/tracker.php?nm=${torrentQuery}`;
 
-  // Row 1: Direct media portals
-  if (animelibUrl) kb.url('🌐 AnimeLib', animelibUrl);
-  if (shikimoriUrl) kb.url('📊 Shikimori', shikimoriUrl);
+  // Row 1: Action Buttons (Скачать, Отметить)
+  if (item.mediaId) {
+    const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
+    kb.text('📥 Скачать', `dl_${item.mediaId}_${epToMark}`);
+    kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
+    kb.row();
+  }
 
-  // Row 2: One-click Torrent search
+  // Row 2: Direct media links (Открыть на сайте, Shikimori)
+  if (animelibUrl) {
+    kb.url('🌐 Открыть на сайте', animelibUrl);
+  }
+  if (shikimoriUrl) {
+    kb.url('📊 Shikimori', shikimoriUrl);
+  }
+
+  // Row 3: Torrent search
   kb.row();
   kb.url('📥 RuTracker (1080p)', rutrackerUrl);
 
-  // Row 3: Action Buttons (Progress & Mark Completed)
-  if (item.mediaId) {
+  // Row 4: Rating & Completed
+  if (item.mediaId && item.shikiId) {
     kb.row();
-    const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
-    kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
-    kb.text('📥 Скачать серию', `dl_${item.mediaId}_${epToMark}`);
-    if (item.shikiId) {
-      kb.row();
-      kb.text('⭐️ Оценить', `rate_menu:${item.shikiId}`);
-      kb.text('🏁 Завершить', `mark_completed:${item.mediaId}:${item.shikiId}`);
-    }
+    kb.text('⭐️ Оценить', `rate_menu:${item.shikiId}`);
+    kb.text('🏁 Завершить', `mark_completed:${item.mediaId}:${item.shikiId}`);
   }
 
   return kb;
@@ -566,129 +570,258 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
     favorites = JSON.parse(prefs.favorite_voiceovers || '[]');
   } catch {}
 
-  const favList = favorites.length > 0 ? favorites.join(', ') : 'Не выбрано';
+  const favList = favorites.length > 0 ? favorites.join(', ') : 'Не выбрано (по умолчанию)';
+  const autoDlStatus = prefs.auto_download_enabled ? 'ВКЛЮЧЕНО ✅' : 'ВЫКЛЮЧЕНО ❌';
   const quietStatus = prefs.quiet_hours_enabled
     ? `Включен (${prefs.quiet_start_hour}:00 - ${prefs.quiet_end_hour}:00)`
     : 'Выключен';
-  const favOnlyStatus = prefs.notify_only_favorites ? 'Да (только в моих студиях)' : 'Нет (любые релизы)';
+  const favOnlyStatus = prefs.notify_only_favorites ? 'Только любимые студии' : 'Все релизы';
 
   const text = [
-    '⚙️ <b>Панель настроек бота и уведомлений</b>',
+    '⚙️ <b>Панель настроек и студий озвучки</b>',
     '━━━━━━━━━━━━━━━━━━━━',
-    '<i>Управление фильтрами озвучки, качеством и интервалами:</i>',
+    '<i>Управление любимой озвучкой, авто-загрузчиком серий и параметрами бота:</i>',
     '',
-    `🎙 <b>Любимые озвучки:</b> 🔥 <code>${escapeHtml(favList)}</code>`,
+    `🎙 <b>Любимые студии озвучки:</b> 🔥 <code>${escapeHtml(favList)}</code>`,
+    `⚡️ <b>Авто-скачивание новых серий:</b> <b>${autoDlStatus}</b>`,
     `🎯 <b>Фильтр релизов:</b> <code>${favOnlyStatus}</code>`,
-    `📺 <b>Качество торрентов:</b> <code>${prefs.preferred_quality || '1080p'}</code>`,
+    `📺 <b>Качество видео:</b> <code>${prefs.preferred_quality || '1080p'}</code>`,
     `🎨 <b>Стиль карточек:</b> <code>${prefs.card_style || 'full'}</code>`,
     `⏱ <b>Интервал проверки:</b> <code>каждые ${prefs.check_interval_min || 30} мин</code>`,
     `🔕 <b>Ночной тихий режим:</b> <code>${quietStatus}</code>`,
     '',
-    '<i>Нажимайте кнопки ниже, чтобы моментально переключать параметры:</i>',
+    '<i>Нажимайте кнопки ниже для моментального переключения параметров:</i>',
   ].join('\n');
 
   const kb = new InlineKeyboard();
 
   // Voiceovers selector button
-  kb.text('🎙 Настроить озвучки', 'settings_voiceovers').row();
+  kb.text('🎙 Настроить любимые озвучки', 'settings_voiceovers').row();
 
-  // Quality toggle (1080p / 720p / 4k)
-  kb.text(`Качество: ${prefs.preferred_quality}`, 'toggle_quality')
-    .text(`Стиль: ${prefs.card_style}`, 'toggle_card_style')
+  // Auto-download toggle
+  const autoDlBtnText = prefs.auto_download_enabled ? '⚡️ Авто-загрузка: [ВКЛ ✅]' : '⚡️ Авто-загрузка: [ВЫКЛ ❌]';
+  kb.text(autoDlBtnText, 'toggle_auto_download').row();
+
+  // Quality & Card style
+  kb.text(`📺 Качество: ${prefs.preferred_quality || '1080p'}`, 'toggle_quality')
+    .text(`🎨 Стиль: ${prefs.card_style || 'full'}`, 'toggle_card_style')
     .row();
 
-  // Notifications filter & Quiet mode
-  kb.text(`Фильтр озвучек: ${prefs.notify_only_favorites ? 'ВКЛ' : 'ВЫКЛ'}`, 'toggle_fav_only')
+  // Filter & Quiet hours
+  kb.text(`🎯 Фильтр: ${prefs.notify_only_favorites ? 'Только любимые' : 'Все озвучки'}`, 'toggle_fav_only')
     .row()
-    .text(`Тихий режим: ${prefs.quiet_hours_enabled ? 'ВКЛ' : 'ВЫКЛ'}`, 'toggle_quiet_hours')
+    .text(`🔕 Тихий режим: ${prefs.quiet_hours_enabled ? 'ВКЛ' : 'ВЫКЛ'}`, 'toggle_quiet_hours')
     .row();
 
-  // Interval toggles
+  // Intervals
   kb.text('⏱ 15 мин', 'set_interval:15')
     .text('⏱ 30 мин', 'set_interval:30')
-    .text('⏱ 1 час', 'set_interval:60');
+    .text('⏱ 1 час', 'set_interval:60')
+    .row();
+
+  // Close menu button
+  kb.text('❌ Закрыть меню', 'close_menu');
 
   return { text, keyboard: kb };
 }
 
 // ==========================================
-// Telegram Bot Command Listeners
+// Telegram Bot Command & Navigation Listeners
 // ==========================================
 
-bot.command('start', async (ctx) => {
+export async function sendMainMenu(ctx: Context) {
   const welcomeText = [
-    '👋 <b>Добро пожаловать в персональный Anime Tracker Hub!</b>',
+    '🎛 <b>Панель управления Anime Tracker Hub</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    'Добро пожаловать! Вы можете полностью управлять ботом через нижнее постоянное меню:',
     '',
-    'Я помогаю отслеживать выход серий на <b>AnimeLib</b> в вашей любимой озвучке, синхронизирую статус с <b>Shikimori</b> и предоставляю быстрый поиск раздач на <b>RuTracker</b>.',
+    '• 🔍 <b>Проверить обновления</b> — сканирование свежих серий на AnimeLib',
+    '• 📥 <b>Скачать серию</b> — мастер выбора тайтла, серии и озвучки (HLS ➔ MP4)',
+    '• 📋 <b>Мой список («Смотрю»)</b> — текущий прогресс, список онгоингов и отметки',
+    '• ⏳ <b>Запланированное</b> — список тайтлов в планах и даты релизов',
+    '• 📊 <b>Статистика медиатеки</b> — состояние базы и синхронизации с Shikimori',
+    '• ⚙️ <b>Настройки и озвучки</b> — выбор студий дубляжа и авто-скачивание',
     '',
-    '💡 Пользуйтесь удобным меню внизу экрана или быстрыми кнопками ниже.',
+    '💡 <i>Постоянное меню закреплено внизу экрана:</i>',
   ].join('\n');
 
   const kb = new InlineKeyboard()
-    .text('🔄 Проверить серии', 'check_updates')
-    .text('📺 Мой список', 'list_watching')
-    .row()
+    .text('🔍 Проверить обновления', 'check_updates')
     .text('📥 Скачать серию', 'dl_back_titles')
-    .text('📅 Календарь', 'show_calendar')
     .row()
-    .text('🎲 Что глянуть?', 'random_planned')
-    .text('⚙️ Настройки', 'open_settings');
+    .text('📋 Мой список («Смотрю»)', 'list_watching')
+    .text('⏳ Запланированное', 'list_planned')
+    .row()
+    .text('📊 Статистика медиатеки', 'show_stats')
+    .text('⚙️ Настройки и озвучки', 'open_settings');
 
   await ctx.reply(welcomeText, {
     parse_mode: 'HTML',
     reply_markup: kb,
   });
 
-  // Also send bottom persistent reply keyboard
-  await ctx.reply('🎛 Главное меню готово к работе:', {
+  // Ensure persistent bottom reply keyboard is sent and restored
+  await ctx.reply('👇 Клавиатура быстрого управления активна:', {
     reply_markup: getMainMenuKeyboard(),
   });
+}
+
+bot.command(['start', 'menu', 'help'], async (ctx) => {
+  await sendMainMenu(ctx);
 });
 
-// Text-based Reply Keyboard listeners
+// System Slash Commands
+bot.command('check', (ctx) => checkAnimeUpdates(ctx, true));
+bot.command('download', (ctx) => showDownloadTitleSelection(ctx));
+bot.command('watching', (ctx) => showWatchingList(ctx));
+bot.command('planned', (ctx) => showPlannedList(ctx));
+bot.command('stats', (ctx) => showLibraryStats(ctx));
+bot.command('profile', (ctx) => showLibraryStats(ctx));
+bot.command('settings', (ctx) => openSettingsMenu(ctx));
+bot.command('calendar', (ctx) => showAnimeCalendar(ctx));
+
+// Text-based Persistent Reply Keyboard Listeners (bot.hears)
+bot.hears('🔍 Проверить обновления', (ctx) => checkAnimeUpdates(ctx, true));
 bot.hears('🔄 Проверить серии', (ctx) => checkAnimeUpdates(ctx, true));
-bot.hears('📺 Мой список', (ctx) => showWatchingList(ctx));
+bot.hears('📥 Скачать серию', (ctx) => showDownloadTitleSelection(ctx));
 bot.hears('📥 Скачать', (ctx) => showDownloadTitleSelection(ctx));
+bot.hears('📋 Мой список («Смотрю»)', (ctx) => showWatchingList(ctx));
+bot.hears('📺 Мой список', (ctx) => showWatchingList(ctx));
+bot.hears('⏳ Запланированное', (ctx) => showPlannedList(ctx));
+bot.hears('📊 Статистика медиатеки', (ctx) => showLibraryStats(ctx));
+bot.hears('👤 Профиль', (ctx) => showLibraryStats(ctx));
+bot.hears('⚙️ Настройки и озвучки', (ctx) => openSettingsMenu(ctx));
+bot.hears('⚙️ Настройки', (ctx) => openSettingsMenu(ctx));
 bot.hears('📅 Календарь', (ctx) => showAnimeCalendar(ctx));
 bot.hears('🎲 Что глянуть?', (ctx) => showRandomRecommendation(ctx));
-bot.hears('👤 Профиль', (ctx) => showUserProfile(ctx));
-bot.hears('⚙️ Настройки', (ctx) => openSettingsMenu(ctx));
-
-bot.command('check', (ctx) => checkAnimeUpdates(ctx, true));
-bot.command('watching', (ctx) => showWatchingList(ctx));
-bot.command('download', (ctx) => showDownloadTitleSelection(ctx));
-bot.command('calendar', (ctx) => showAnimeCalendar(ctx));
-bot.command('settings', (ctx) => openSettingsMenu(ctx));
-bot.command('profile', (ctx) => showUserProfile(ctx));
 
 // ==========================================
-// Helper Handlers
+// Navigation & Lists Handlers
 // ==========================================
 
-async function showWatchingList(ctx: Context) {
+export async function showWatchingList(ctx: Context) {
   await ctx.reply('🔍 <i>Загружаю текущие тайтлы из раздела «Смотрю»...</i>', { parse_mode: 'HTML' });
-  const list = await animelibService.getAllWatching();
+  let list = await animelibService.getAllWatching();
 
   if (!list || list.length === 0) {
+    const cached = dbService.getAllSyncItems('watching');
+    if (cached && cached.length > 0) {
+      list = cached.map((c) => ({
+        media_id: c.media_id,
+        slug_url: String(c.media_id),
+        name: c.title,
+        rus_name: c.rus_title,
+        current_progress_number: c.last_tracked_episode,
+        last_item_number: c.latest_episode || c.last_tracked_episode,
+      }));
+    }
+  }
+
+  if (!list || list.length === 0) {
+    const emptyKb = new InlineKeyboard()
+      .text('🔍 Проверить обновления', 'check_updates')
+      .text('⏳ Запланированное', 'list_planned')
+      .row()
+      .text('❌ Закрыть меню', 'close_menu');
     return ctx.reply('📭 Список «Смотрю» пуст или сессия истекла. Обновите <code>ANIMELIB_COOKIE</code> в .env.', {
       parse_mode: 'HTML',
+      reply_markup: emptyKb,
     });
   }
 
   const lines = list.slice(0, 15).map((item, idx) => {
-    const progress = item.current_progress_number ? ` (серия <code>#${item.current_progress_number}</code>)` : '';
+    const curEp = item.current_progress_number || 0;
+    const maxEp = item.last_item_number && item.last_item_number > 0 ? item.last_item_number : '?';
     const stored = dbService.getSyncItemByMediaId(item.media_id);
+    const prefVo = stored?.preferred_voiceover ? ` [🎙 ${escapeHtml(stored.preferred_voiceover)}]` : '';
     const note = stored?.custom_note ? ` — <i>«${escapeHtml(stored.custom_note)}»</i>` : '';
-    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>${progress}${note}`;
+    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>\n   └ Прогресс: <code>#${curEp}</code> из <code>#${maxEp}</code>${prefVo}${note}`;
   });
 
-  const totalText = `📺 <b>Ваш текущий список просмотра (${list.length} тайтлов):</b>\n\n${lines.join('\n')}${
-    list.length > 15 ? `\n<i>...и еще ${list.length - 15}</i>` : ''
-  }`;
+  const totalText = [
+    `📋 <b>Мой список онгоингов («Смотрю»)</b> [${list.length} тайтлов]`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    lines.join('\n\n'),
+    list.length > 15 ? `\n<i>...и ещё ${list.length - 15} тайтлов</i>` : '',
+    '',
+    '<i>Выберите действие:</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard();
+
+  // Quick download buttons for first 4 titles
+  const quickItems = list.slice(0, 4);
+  for (let i = 0; i < quickItems.length; i++) {
+    const it = quickItems[i];
+    const name = it.rus_name || it.name;
+    const shortName = name.length > 18 ? name.slice(0, 16) + '…' : name;
+    const nextEp = (it.current_progress_number || 0) + 1;
+    kb.text(`📥 ${shortName} (#${nextEp})`, `dl_${it.media_id}_${nextEp}`);
+    if (i % 2 === 1) kb.row();
+  }
+  if (quickItems.length % 2 !== 0) kb.row();
+
+  kb.text('📥 Выбрать серию для скачивания', 'dl_back_titles').row()
+    .text('🔍 Проверить обновления', 'check_updates')
+    .text('⏳ Запланированное', 'list_planned')
+    .row()
+    .text('❌ Закрыть меню', 'close_menu');
+
+  await ctx.reply(totalText, { parse_mode: 'HTML', reply_markup: kb });
+}
+
+export async function showPlannedList(ctx: Context) {
+  await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное»...</i>', { parse_mode: 'HTML' });
+
+  let plannedItems = dbService.getAllSyncItems('planned');
+  if (!plannedItems || plannedItems.length === 0) {
+    try {
+      await animelibService.getAllTrackedBookmarks();
+      plannedItems = dbService.getAllSyncItems('planned');
+    } catch {}
+  }
+
+  if (!plannedItems || plannedItems.length === 0) {
+    const emptyKb = new InlineKeyboard()
+      .text('📋 Список «Смотрю»', 'list_watching')
+      .text('🎲 Случайное', 'random_planned')
+      .row()
+      .text('❌ Закрыть меню', 'close_menu');
+
+    return ctx.reply('📭 В списке <b>«Запланированное»</b> пока нет сохранённых тайтлов.', {
+      parse_mode: 'HTML',
+      reply_markup: emptyKb,
+    });
+  }
+
+  const lines = plannedItems.slice(0, 15).map((item, idx) => {
+    const title = escapeHtml(item.rus_title || item.title);
+    const latest = item.latest_episode && item.latest_episode > 0
+      ? ` (вышло: <code>#${item.latest_episode}</code>)`
+      : ' (анонс / ещё не вышло)';
+    const note = item.custom_note ? ` — <i>«${escapeHtml(item.custom_note)}»</i>` : '';
+    return `${idx + 1}. <b>${title}</b>${latest}${note}`;
+  });
+
+  const totalText = [
+    `⏳ <b>Список «Запланированное»</b> [${plannedItems.length} тайтлов]`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    '<i>Тайтлы, ожидающие просмотра или выхода новых сезонов:</i>',
+    '',
+    lines.join('\n\n'),
+    plannedItems.length > 15 ? `\n<i>...и ещё ${plannedItems.length - 15} тайтлов</i>` : '',
+    '',
+    '<i>Выберите действие:</i>',
+  ].join('\n');
 
   const kb = new InlineKeyboard()
-    .text('🔄 Проверить серии', 'check_updates')
-    .text('🎲 Случайный тайтл', 'random_planned');
+    .text('📥 Скачать серию из списка', 'dl_back_titles')
+    .text('🎲 Случайное из планов', 'random_from_planned')
+    .row()
+    .text('📋 Мой список («Смотрю»)', 'list_watching')
+    .text('🔍 Проверить обновления', 'check_updates')
+    .row()
+    .text('❌ Закрыть меню', 'close_menu');
 
   await ctx.reply(totalText, { parse_mode: 'HTML', reply_markup: kb });
 }
@@ -913,9 +1046,9 @@ async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned
   }
 }
 
-async function showUserProfile(ctx: Context) {
+export async function showLibraryStats(ctx: Context) {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
-  const profile = await shikimoriService.getUserProfile();
+  const profile = await shikimoriService.getUserProfile().catch(() => null);
   const libStats = await getLibraryComprehensiveStats(userId);
 
   const animelibUserId = process.env.ANIMELIB_USER_ID || 'Не указан';
@@ -947,51 +1080,49 @@ async function showUserProfile(ctx: Context) {
       '⏱ <b>Результат последней проверки:</b>',
       '  • 🕒 <i>Ожидается первая проверка тайтлов...</i>',
       `  • ⏰ <b>Интервал автопроверки:</b> каждые <code>${prefs.check_interval_min || 30} мин</code>`,
-      '  • 💡 <i>Нажмите «🔄 Проверить серии», чтобы запустить немедленно.</i>',
+      '  • 💡 <i>Нажмите «🔍 Проверить обновления», чтобы запустить немедленно.</i>',
     ].join('\n');
   }
 
   const lines = [
-    '👤 <b>Карточка профиля & Статистика библиотеки</b>',
+    '📊 <b>Статистика медиатеки & Синхронизация</b>',
     '━━━━━━━━━━━━━━━━━━━━',
     `🆔 <b>Telegram ID:</b> <code>${userId}</code>`,
     `🌐 <b>Shikimori:</b> <code>${escapeHtml(shikiNick)}</code> (ID: <code>${shikiId}</code>)`,
     `📚 <b>AnimeLib ID:</b> <code>${escapeHtml(animelibUserId)}</code>`,
     '',
-    '📊 <b>Категории аниме (Все вкладки):</b>',
-    `  • 📺 <b>Смотрю сейчас:</b> <code>${libStats.watching}</code> тайтлов`,
-    `  • 📌 <b>В планах:</b> <code>${libStats.planned}</code> тайтлов`,
+    '📁 <b>Категории библиотеки:</b>',
+    `  • 📺 <b>Смотрю сейчас:</b> <code>${libStats.watching}</code> онгоингов`,
+    `  • ⏳ <b>Запланировано:</b> <code>${libStats.planned}</code> тайтлов`,
     `  • 🏁 <b>Просмотрено:</b> <code>${libStats.completed}</code> аниме`,
     `  • ❤️ <b>Любимые:</b> <code>${libStats.favorites}</code> тайтлов`,
     `  • 🔁 <b>Пересматриваю:</b> <code>${libStats.rewatching}</code>`,
-    `  • ⏸️ <b>Отложено:</b> <code>${libStats.on_hold}</code>`,
-    `  • 🚫 <b>Брошено:</b> <code>${libStats.dropped}</code> тайтлов`,
-    `  • ⚔️ <b>FATE (коллекция):</b> <code>${libStats.fate}</code> тайтлов`,
+    `  • ⏸️ <b>Отложено:</b> <code>${libStats.on_hold}</code> | 🚫 <b>Брошено:</b> <code>${libStats.dropped}</code>`,
     '  ──────────────────',
-    `  📦 <b>Всего в библиотеке:</b> <code>${libStats.totalTracked}</code> тайтлов`,
+    `  📦 <b>Всего отслеживается:</b> <code>${libStats.totalTracked}</code> тайтлов`,
     '',
-    '🔄 <b>Синхронизация & Перенос на Shikimori:</b>',
+    '🔄 <b>Синхронизация & Миграция на Shikimori:</b>',
     `  • 🚀 <b>Перенесено на Shikimori:</b> <code>${libStats.shikiTransferredCount} / ${libStats.totalTracked}</code> (${libStats.shikiMatchRatePercent}%)`,
     `  • 🎯 <b>Проверено & сматчено:</b> <code>${libStats.shikiVerifiedCount}</code> тайтлов`,
-    '  • 🔗 <b>Мост синхронизации:</b> AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]',
+    '  • 🔗 <b>Мост:</b> AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]',
     '',
     checkSection,
   ];
 
   const kb = new InlineKeyboard()
-    .text('🔄 Проверить серии', 'check_updates')
-    .text('📺 Мой список', 'list_watching')
-    .row();
-
-  if (profile?.id) {
-    kb.url('📊 Профиль Shikimori', `https://shikimori.one/${profile.nickname || profile.id}`);
-  }
-  if (process.env.ANIMELIB_USER_ID) {
-    kb.url('🌐 Закладки AnimeLib', `${ANIMELIB_WEB_URL}/ru/user/${process.env.ANIMELIB_USER_ID}/bookmarks`);
-  }
+    .text('🔍 Проверить обновления', 'check_updates')
+    .text('📥 Скачать серию', 'dl_back_titles')
+    .row()
+    .text('📋 Мой список («Смотрю»)', 'list_watching')
+    .text('⏳ Запланированное', 'list_planned')
+    .row()
+    .text('⚙️ Настройки и озвучки', 'open_settings')
+    .text('❌ Закрыть меню', 'close_menu');
 
   await ctx.reply(lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
 }
+
+export const showUserProfile = showLibraryStats;
 
 async function openSettingsMenu(ctx: Context) {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
@@ -1008,9 +1139,32 @@ bot.callbackQuery('check_updates', async (ctx) => {
   await checkAnimeUpdates(ctx, true);
 });
 
+bot.callbackQuery('show_stats', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showLibraryStats(ctx);
+});
+
 bot.callbackQuery('list_watching', async (ctx) => {
   await ctx.answerCallbackQuery();
   await showWatchingList(ctx);
+});
+
+bot.callbackQuery('list_planned', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showPlannedList(ctx);
+});
+
+bot.callbackQuery('close_menu', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Меню закрыто' });
+  try {
+    await ctx.deleteMessage();
+  } catch {
+    try {
+      await ctx.editMessageText('✖️ <b>Панель закрыта.</b>\nВоспользуйтесь нижним меню для дальнейшей навигации.', {
+        parse_mode: 'HTML',
+      });
+    } catch {}
+  }
 });
 
 bot.callbackQuery('show_calendar', async (ctx) => {
@@ -1288,6 +1442,7 @@ export async function showDownloadTitleSelection(ctx: Context) {
     const shortTitle = name.length > 30 ? name.slice(0, 28) + '…' : name;
     kb.text(`${i + 1}. ${shortTitle}`, `dl_title:${item.media_id}`).row();
   }
+  kb.text('❌ Закрыть меню', 'close_menu');
 
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery();
@@ -1343,7 +1498,8 @@ export async function showEpisodeSelection(ctx: Context, mediaId: number) {
   if (col % 4 !== 0) {
     kb.row();
   }
-  kb.text('⬅️ Назад к тайтлам', 'dl_back_titles');
+  kb.text('⬅️ Назад', 'dl_back_titles')
+    .text('❌ Закрыть меню', 'close_menu');
 
   try {
     await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
@@ -1379,7 +1535,8 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
   if (studios.length % 2 !== 0) {
     kb.row();
   }
-  kb.text('⬅️ Назад к выбору серий', `dl_back_eps:${mediaId}`);
+  kb.text('⬅️ Назад', `dl_back_eps:${mediaId}`)
+    .text('❌ Закрыть меню', 'close_menu');
 
   const prefNotice = preferredVo ? `\n⭐️ <i>Предпочитаемая озвучка: <b>${escapeHtml(preferredVo)}</b></i>` : '';
   const text = [
@@ -1504,7 +1661,7 @@ bot.callbackQuery('settings_voiceovers', async (ctx) => {
     if (idx % 2 === 1) kb.row();
   });
 
-  kb.row().text('🔙 Сохранить и вернуться', 'open_settings');
+  kb.row().text('⬅️ Назад', 'open_settings').text('❌ Закрыть меню', 'close_menu');
 
   await ctx.reply('🎙 <b>Выберите ваши любимые студии дубляжа:</b>\n<i>(Нажмите на студию для добавления / удаления)</i>', {
     parse_mode: 'HTML',
@@ -1532,10 +1689,25 @@ bot.callbackQuery(/^toggle_voice:(.+)$/, async (ctx) => {
     kb.text(label, `toggle_voice:${s}`);
     if (idx % 2 === 1) kb.row();
   });
-  kb.row().text('🔙 Сохранить и вернуться', 'open_settings');
+  kb.row().text('⬅️ Назад', 'open_settings').text('❌ Закрыть меню', 'close_menu');
 
   try {
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
+  } catch {}
+});
+
+// Settings: Toggle Auto-Download
+bot.callbackQuery('toggle_auto_download', async (ctx) => {
+  const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
+  const prefs = dbService.getUserPreferences(userId);
+  const nextVal = prefs.auto_download_enabled ? 0 : 1;
+
+  dbService.updateUserPreferences(userId, { auto_download_enabled: nextVal });
+  await ctx.answerCallbackQuery({ text: nextVal ? 'Авто-загрузка включена ✅' : 'Авто-загрузка выключена ❌' });
+
+  const { text, keyboard } = renderSettingsKeyboard(userId);
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: keyboard });
   } catch {}
 });
 
@@ -1658,6 +1830,21 @@ export async function startBot() {
   isBotRunning = true;
   console.log('🤖 Starting Personalized Anime Tracker Bot with grammY...');
   startScheduler(30);
+
+  try {
+    await bot.api.setMyCommands([
+      { command: 'menu', description: '🎛 Главное меню управления' },
+      { command: 'check', description: '🔍 Проверить свежие серии' },
+      { command: 'download', description: '📥 Скачать серию (мастер)' },
+      { command: 'watching', description: '📋 Мой список («Смотрю»)' },
+      { command: 'planned', description: '⏳ Запланированное' },
+      { command: 'stats', description: '📊 Статистика медиатеки' },
+      { command: 'settings', description: '⚙️ Настройки и озвучки' },
+    ]);
+    console.log('✅ Telegram bot menu commands registered successfully.');
+  } catch (cmdErr) {
+    console.warn('⚠️ Failed to register bot commands via setMyCommands:', cmdErr);
+  }
 
   bot.start({
     onStart: (botInfo) => {
