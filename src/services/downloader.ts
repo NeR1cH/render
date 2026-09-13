@@ -127,15 +127,17 @@ export class DownloaderService {
       streamHeaders?.['User-Agent'] ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
-    const referer =
-      streamHeaders?.['Referer'] ||
-      (videoUrl.includes('kodik') || videoUrl.includes('solodcdn')
-        ? 'https://kodikplayer.com/'
-        : `${ANIMELIB_WEB_URL}/`);
+    const isKodik = videoUrl.includes('kodik') || videoUrl.includes('solodcdn');
+    const defaultReferer = isKodik ? 'https://kodikplayer.com/' : 'https://animelib.org/';
+    const defaultOrigin = isKodik ? 'https://kodikplayer.com' : 'https://animelib.org';
+
+    const referer = streamHeaders?.['Referer'] || defaultReferer;
+    const origin = streamHeaders?.['Origin'] || defaultOrigin;
 
     const effectiveHeaders: Record<string, string> = {
       'User-Agent': userAgent,
       'Referer': referer,
+      'Origin': origin,
       ...(streamHeaders || {}),
     };
 

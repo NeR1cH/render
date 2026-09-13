@@ -320,6 +320,17 @@ export const dbService = {
     });
   },
 
+  setPreferredVoiceover(mediaId: number, voiceover: string | null) {
+    const stmt = db.prepare('UPDATE animelib_sync SET preferred_voiceover = ?, last_checked_at = ? WHERE media_id = ?');
+    stmt.run(voiceover, Date.now(), mediaId);
+  },
+
+  getPreferredVoiceover(mediaId: number): string | null {
+    const stmt = db.prepare('SELECT preferred_voiceover FROM animelib_sync WHERE media_id = ?');
+    const row = stmt.get(mediaId) as { preferred_voiceover?: string | null } | undefined;
+    return row?.preferred_voiceover || null;
+  },
+
   updateTrackedEpisode(mediaId: number, episode: number) {
     const stmt = db.prepare('UPDATE animelib_sync SET last_tracked_episode = MAX(COALESCE(last_tracked_episode, 0), ?), last_checked_at = ? WHERE media_id = ?');
     stmt.run(episode, Date.now(), mediaId);

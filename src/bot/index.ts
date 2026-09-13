@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard, Keyboard, Context } from 'grammy';
 import dotenv from 'dotenv';
-import { animelibService, AnimeLibService, ANIMELIB_WEB_URL, AnimeLibBookmarkItem } from '../services/animelib';
+import { animelibService, AnimeLibService, ANIMELIB_WEB_URL, AnimeLibBookmarkItem, POPULAR_STUDIOS } from '../services/animelib';
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 import { getLibraryComprehensiveStats } from '../services/libraryStats';
@@ -17,18 +17,7 @@ if (!BOT_TOKEN) {
 
 export const bot = new Bot(BOT_TOKEN || '000000000:AAFakeTokenForOfflineMode');
 
-// Top standard popular anime voiceover studios
-export const POPULAR_STUDIOS = [
-  'AniLibria',
-  'Dream Cast',
-  'Studio Band',
-  'DEEP',
-  'Дубляжная',
-  'SHIZA Project',
-  'AniDUB',
-  'Red Head Sound',
-  'Flarrow Films',
-];
+export { POPULAR_STUDIOS };
 
 // ==========================================
 // Persistent Bottom Menu (Reply Keyboard)
@@ -192,11 +181,13 @@ export function buildAnimeCardKeyboard(item: {
   const torrentQuery = encodeURIComponent(`${item.title}${searchQuality}`);
   const rutrackerUrl = `https://rutracker.org/forum/tracker.php?nm=${torrentQuery}`;
 
-  // Row 1: Action Buttons (Скачать, Отметить)
+  // Row 1: Action Buttons (Скачать, Отметить, Настроить озвучку)
   if (item.mediaId) {
     const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
     kb.text('📥 Скачать', `dl_${item.mediaId}_${epToMark}`);
     kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
+    kb.row();
+    kb.text('🎙 Настроить озвучку', `setup_vo:${item.mediaId}`);
     kb.row();
   }
 
@@ -303,11 +294,26 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
   }> = [];
 
   try {
-    await send('⏳ <i>Проверяю ваши закладки AnimeLib и новые серии...</i>', {
+    await send('⏳ <i>Проверяю онгоинги из раздела «Смотрю» (AnimeLib)...</i>', {
       parse_mode: 'HTML',
     });
 
-    const trackedList = await animelibService.getAllTrackedBookmarks();
+    // Проверяем ИСКЛЮЧИТЕЛЬНО онгоинги из раздела «Смотрю» (5 тайтлов)
+    let trackedList = await animelibService.getAllWatching();
+    if (!trackedList || trackedList.length === 0) {
+      const cached = dbService.getAllSyncItems('watching');
+      if (cached && cached.length > 0) {
+        trackedList = cached.map((c) => ({
+          media_id: c.media_id,
+          slug_url: String(c.media_id),
+          name: c.title,
+          rus_name: c.rus_title,
+          current_progress_number: c.last_tracked_episode,
+          last_item_number: c.latest_episode || c.last_tracked_episode,
+          folderStatus: 'watching',
+        }));
+      }
+    }
 
     if (!trackedList || trackedList.length === 0) {
       dbService.saveCheckReport({
@@ -317,12 +323,12 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         matched_count: 0,
         synced_count: 0,
         status: 'warning',
-        message: 'Списки «Смотрю» и «Запланировано» пусты или требуется обновление cookie',
+        message: 'Раздел «Смотрю» пуст или требуется обновление cookie',
       });
 
       if (notifyIfEmpty) {
         await send(
-          '📭 В списках <b>«Смотрю»</b> и <b>«Запланировано»</b> пока нет тайтлов, либо нужно обновить куку в <code>ANIMELIB_COOKIE</code>.',
+          '📭 В списке <b>«Смотрю»</b> пока нет онгоингов, либо нужно обновить куку в <code>ANIMELIB_COOKIE</code>.',
           { parse_mode: 'HTML' }
         );
       }
@@ -331,7 +337,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         checkedCount: 0,
         updatesCount: 0,
         updatedTitles: [],
-        message: 'В отслеживаемых списках пока нет тайтлов или требуется обновление cookie',
+        message: 'В разделе «Смотрю» пока нет тайтлов или требуется обновление cookie',
       };
     }
 
@@ -497,7 +503,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
     if (updatesCount === 0 && notifyIfEmpty) {
       await send(
-        `✨ <b>Все серии просмотрены!</b>\nПроверено <b>${trackedList.length}</b> тайтлов из списков «Смотрю» и «Запланировано», свежих серий пока нет.`,
+        `✨ <b>Все серии просмотрены!</b>\nПроверено <b>${trackedList.length}</b> онгоингов из раздела «Смотрю», свежих серий пока нет.`,
         {
           parse_mode: 'HTML',
           reply_markup: new InlineKeyboard().text('🔄 Проверить снова', 'check_updates'),
@@ -595,8 +601,10 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
 
   const kb = new InlineKeyboard();
 
-  // Voiceovers selector button
-  kb.text('🎙 Настроить любимые озвучки', 'settings_voiceovers').row();
+  // Voiceovers selector buttons
+  kb.text('🎙 Озвучки тайтлов («Смотрю»)', 'list_watching')
+    .text('⭐ Глобальные озвучки', 'settings_voiceovers')
+    .row();
 
   // Auto-download toggle
   const autoDlBtnText = prefs.auto_download_enabled ? '⚡️ Авто-загрузка: [ВКЛ ✅]' : '⚡️ Авто-загрузка: [ВЫКЛ ❌]';
@@ -729,39 +737,42 @@ export async function showWatchingList(ctx: Context) {
     });
   }
 
-  const lines = list.slice(0, 15).map((item, idx) => {
+  const lines = list.map((item, idx) => {
     const curEp = item.current_progress_number || 0;
     const maxEp = item.last_item_number && item.last_item_number > 0 ? item.last_item_number : '?';
     const stored = dbService.getSyncItemByMediaId(item.media_id);
-    const prefVo = stored?.preferred_voiceover ? ` [🎙 ${escapeHtml(stored.preferred_voiceover)}]` : '';
-    const note = stored?.custom_note ? ` — <i>«${escapeHtml(stored.custom_note)}»</i>` : '';
-    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>\n   └ Прогресс: <code>#${curEp}</code> из <code>#${maxEp}</code>${prefVo}${note}`;
+    const prefVo = dbService.getPreferredVoiceover(item.media_id) || stored?.preferred_voiceover;
+    const voBadge = prefVo ? ` | 🎙 <b>${escapeHtml(prefVo)}</b>` : ' | 🎙 <i>(озвучка не выбрана)</i>';
+    const note = stored?.custom_note ? `\n   📌 <i>«${escapeHtml(stored.custom_note)}»</i>` : '';
+    return `${idx + 1}. <b>${escapeHtml(item.rus_name || item.name)}</b>\n   └ Прогресс: <code>#${curEp}</code> из <code>#${maxEp}</code>${voBadge}${note}`;
   });
 
   const totalText = [
     `📋 <b>Мой список онгоингов («Смотрю»)</b> [${list.length} тайтлов]`,
     '━━━━━━━━━━━━━━━━━━━━',
     lines.join('\n\n'),
-    list.length > 15 ? `\n<i>...и ещё ${list.length - 15} тайтлов</i>` : '',
     '',
-    '<i>Выберите действие:</i>',
+    '<i>Нажмите кнопку под тайтлом для настройки студии озвучки или скачивания:</i>',
   ].join('\n');
 
   const kb = new InlineKeyboard();
 
-  // Quick download buttons for first 4 titles
-  const quickItems = list.slice(0, 4);
-  for (let i = 0; i < quickItems.length; i++) {
-    const it = quickItems[i];
+  // Individual buttons for each of the watching titles
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i];
     const name = it.rus_name || it.name;
-    const shortName = name.length > 18 ? name.slice(0, 16) + '…' : name;
+    const shortName = name.length > 16 ? name.slice(0, 14) + '…' : name;
     const nextEp = (it.current_progress_number || 0) + 1;
-    kb.text(`📥 ${shortName} (#${nextEp})`, `dl_${it.media_id}_${nextEp}`);
-    if (i % 2 === 1) kb.row();
-  }
-  if (quickItems.length % 2 !== 0) kb.row();
+    const stored = dbService.getSyncItemByMediaId(it.media_id);
+    const prefVo = dbService.getPreferredVoiceover(it.media_id) || stored?.preferred_voiceover;
+    const voLabel = prefVo ? `🎙 ${prefVo.slice(0, 12)}` : '🎙 Настроить';
 
-  kb.text('📥 Выбрать серию для скачивания', 'dl_back_titles').row()
+    kb.text(`📥 #${nextEp} ${shortName}`, `dl_${it.media_id}_${nextEp}`)
+      .text(voLabel, `setup_vo:${it.media_id}`)
+      .row();
+  }
+
+  kb.text('📥 Выбрать другую серию', 'dl_back_titles').row()
     .text('🔍 Проверить обновления', 'check_updates')
     .text('⏳ Запланированное', 'list_planned')
     .row()
@@ -771,45 +782,61 @@ export async function showWatchingList(ctx: Context) {
 }
 
 export async function showPlannedList(ctx: Context) {
-  await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное»...</i>', { parse_mode: 'HTML' });
+  await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное» (AnimeLib)...</i>', { parse_mode: 'HTML' });
 
-  let plannedItems = dbService.getAllSyncItems('planned');
-  if (!plannedItems || plannedItems.length === 0) {
-    try {
-      await animelibService.getAllTrackedBookmarks();
-      plannedItems = dbService.getAllSyncItems('planned');
-    } catch {}
+  let plannedResult: { active: any[]; totalPlanned: number } = { active: [], totalPlanned: 0 };
+  try {
+    plannedResult = await animelibService.getAllPlanned();
+  } catch (err: any) {
+    console.warn('[AnimeLib] Error fetching paginated planned titles:', err?.message);
   }
 
-  if (!plannedItems || plannedItems.length === 0) {
+  let activeList = plannedResult.active;
+  let totalCount = plannedResult.totalPlanned;
+
+  if (activeList.length === 0) {
+    const plannedDb = dbService.getAllSyncItems('planned');
+    if (plannedDb && plannedDb.length > 0) {
+      activeList = plannedDb.map((p) => ({
+        media_id: p.media_id,
+        slug_url: String(p.media_id),
+        name: p.title,
+        rus_name: p.rus_title,
+        current_progress_number: p.last_tracked_episode,
+        last_item_number: p.latest_episode,
+      }));
+      totalCount = plannedDb.length;
+    }
+  }
+
+  if (activeList.length === 0) {
     const emptyKb = new InlineKeyboard()
       .text('📋 Список «Смотрю»', 'list_watching')
       .text('🎲 Случайное', 'random_planned')
       .row()
       .text('❌ Закрыть меню', 'close_menu');
 
-    return ctx.reply('📭 В списке <b>«Запланированное»</b> пока нет сохранённых тайтлов.', {
+    return ctx.reply('📭 В списке <b>«Запланированное»</b> нет актуальных ожидаемых релизов.', {
       parse_mode: 'HTML',
       reply_markup: emptyKb,
     });
   }
 
-  const lines = plannedItems.slice(0, 15).map((item, idx) => {
-    const title = escapeHtml(item.rus_title || item.title);
-    const latest = item.latest_episode && item.latest_episode > 0
-      ? ` (вышло: <code>#${item.latest_episode}</code>)`
-      : ' (анонс / ещё не вышло)';
-    const note = item.custom_note ? ` — <i>«${escapeHtml(item.custom_note)}»</i>` : '';
-    return `${idx + 1}. <b>${title}</b>${latest}${note}`;
+  const lines = activeList.slice(0, 15).map((item, idx) => {
+    const title = escapeHtml(item.rus_name || item.name);
+    const latest = item.last_item_number && item.last_item_number > 0
+      ? ` (вышло: <code>#${item.last_item_number}</code>)`
+      : ' <i>(анонс)</i>';
+    return `${idx + 1}. <b>${title}</b>${latest}`;
   });
 
   const totalText = [
-    `⏳ <b>Список «Запланированное»</b> [${plannedItems.length} тайтлов]`,
+    `⏳ <b>Список «Запланированное»</b> [Ожидается: ${activeList.length} из ${totalCount} в планах]`,
     '━━━━━━━━━━━━━━━━━━━━',
-    '<i>Тайтлы, ожидающие просмотра или выхода новых сезонов:</i>',
+    '<i>Тайтлы, ожидающие просмотра или выхода новых серий (архивные завершённые релизы исключены):</i>',
     '',
     lines.join('\n\n'),
-    plannedItems.length > 15 ? `\n<i>...и ещё ${plannedItems.length - 15} тайтлов</i>` : '',
+    activeList.length > 15 ? `\n<i>...и ещё ${activeList.length - 15} активных тайтлов</i>` : '',
     '',
     '<i>Выберите действие:</i>',
   ].join('\n');
@@ -1562,10 +1589,63 @@ bot.callbackQuery(/^(?:dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
   await showEpisodeSelection(ctx, mediaId);
 });
 
-// Callback: Choose Episode -> Show Voiceovers
+// Callback: Choose Episode -> Show Voiceovers (or auto-select preferred voiceover)
 bot.callbackQuery(/^dl_ep:(\d+):([\d.]+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
   const ep = parseFloat(ctx.match[2]);
+
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const preferredVo = dbService.getPreferredVoiceover(mediaId) || stored?.preferred_voiceover;
+
+  // Если для этого тайтла настроена индивидуальная озвучка, проверяем её наличие для серии
+  if (preferredVo && preferredVo.trim()) {
+    const normPref = preferredVo.trim().toLowerCase();
+    const studios = await animelibService.getEpisodeStudios(mediaId, ep);
+    const matchedStudio = studios.find(
+      (s) => s.toLowerCase().includes(normPref) || normPref.includes(s.toLowerCase())
+    );
+
+    // Если студия найдена (или API не отдал список студий и выбор происходит в плеере)
+    if (matchedStudio || studios.length === 0) {
+      const finalVoiceover = matchedStudio || preferredVo;
+      await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} (${finalVoiceover})!` });
+
+      const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+      const text = [
+        '📥 <b>Серия поставлена в очередь скачивания!</b>',
+        '━━━━━━━━━━━━━━━━━━━━',
+        `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
+        `🎬 <b>Серия:</b> <code>#${ep}</code>`,
+        `🎙 <b>Ваша выбранная озвучка:</b> <code>${escapeHtml(finalVoiceover)}</code>`,
+        '',
+        '⏳ <i>Инициализация видеопотока и запуск FFmpeg...</i>',
+      ].join('\n');
+
+      const kb = new InlineKeyboard()
+        .text('📺 Другая серия этого тайтла', `dl_title:${mediaId}`)
+        .row()
+        .text('📋 Выбрать другой тайтл', 'dl_back_titles')
+        .text('📺 Мой список', 'list_watching');
+
+      let sentMsg: any = null;
+      try {
+        sentMsg = await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+      } catch {
+        sentMsg = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+      }
+
+      const chatId = ctx.chat?.id ? String(ctx.chat.id) : undefined;
+      const messageId = sentMsg && typeof sentMsg === 'object' && 'message_id' in sentMsg ? sentMsg.message_id : undefined;
+
+      downloaderService.addToQueue(mediaId, ep, finalVoiceover, chatId, messageId);
+      downloaderService.processQueue().catch((err) => {
+        console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
+      });
+      return;
+    }
+  }
+
+  // Если индивидуальная озвучка не настроена или отсутствует для этой серии — открываем выбор
   await ctx.answerCallbackQuery({ text: `Ищу доступные озвучки для серии #${ep}...` });
   await showVoiceoverSelection(ctx, mediaId, ep);
 });
@@ -1611,6 +1691,136 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
   downloaderService.processQueue().catch((err) => {
     console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
   });
+});
+
+// ==========================================
+// Individual Voiceover Settings per Title
+// ==========================================
+
+// Setup Voiceover for Title: Fetch actual studios from AnimeLib
+bot.callbackQuery(/^setup_vo:(\d+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  await ctx.answerCallbackQuery({ text: 'Запрашиваю студии озвучки на AnimeLib...' });
+
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+  const currentPref = dbService.getPreferredVoiceover(mediaId) || stored?.preferred_voiceover;
+
+  let studios = await animelibService.getTitleVoiceovers(mediaId);
+  if (!studios || studios.length === 0) {
+    studios = await animelibService.getEpisodeStudios(mediaId, 1);
+  }
+  if (!studios || studios.length === 0) {
+    studios = POPULAR_STUDIOS;
+  }
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < studios.length; i++) {
+    const s = studios[i];
+    const isSelected = currentPref && (s.toLowerCase() === currentPref.toLowerCase());
+    const label = `${isSelected ? '✅ ' : '▫️ '}${s}`;
+    kb.text(label, `set_vo:${mediaId}:${encodeURIComponent(s)}`);
+    if (i % 2 === 1) kb.row();
+  }
+  if (studios.length % 2 !== 0) kb.row();
+
+  if (currentPref) {
+    kb.text('🔄 Сбросить выбор озвучки', `reset_vo:${mediaId}`).row();
+  }
+
+  kb.text('⬅️ Назад в «Смотрю»', 'list_watching')
+    .text('❌ Закрыть', 'close_menu');
+
+  const currentDesc = currentPref
+    ? `Текущая озвучка: 🔥 <b>${escapeHtml(currentPref)}</b>`
+    : 'Текущая озвучка: <i>(не выбрана, скачивается по умолчанию)</i>';
+
+  const text = [
+    '🎙 <b>Настройка индивидуальной озвучки</b>',
+    `📺 <b>${escapeHtml(title)}</b>`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    currentDesc,
+    '',
+    '<i>Выберите студию из озвучивающих этот тайтл на AnimeLib:</i>\n' +
+    '<i>(Эта студия будет автоматически подставляться при скачивании новых серий)</i>',
+  ].join('\n');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+});
+
+// Save Selected Voiceover for Title
+bot.callbackQuery(/^set_vo:(\d+):(.+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const studio = decodeURIComponent(ctx.match[2]).trim();
+
+  dbService.setPreferredVoiceover(mediaId, studio);
+  await ctx.answerCallbackQuery({ text: `✅ Озвучка сохранена: ${studio}` });
+
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+
+  const text = [
+    '✅ <b>Озвучка успешно сохранена!</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
+    `🎙 <b>Выбранная студия:</b> <code>${escapeHtml(studio)}</code>`,
+    '',
+    '✨ <i>При скачивании серий этого тайтла бот будет сразу выбирать данную озвучку без лишних подтверждений.</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard()
+    .text('📥 Скачать серию', `dl_title:${mediaId}`)
+    .text('🎙 Сменить озвучку', `setup_vo:${mediaId}`)
+    .row()
+    .text('📋 Мой список («Смотрю»)', 'list_watching')
+    .text('❌ Закрыть', 'close_menu');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+});
+
+// Reset Voiceover for Title
+bot.callbackQuery(/^reset_vo:(\d+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  dbService.setPreferredVoiceover(mediaId, '');
+  await ctx.answerCallbackQuery({ text: 'Озвучка сброшена' });
+
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+
+  let studios = await animelibService.getTitleVoiceovers(mediaId);
+  if (!studios || studios.length === 0) studios = POPULAR_STUDIOS;
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < studios.length; i++) {
+    const s = studios[i];
+    kb.text(`▫️ ${s}`, `set_vo:${mediaId}:${encodeURIComponent(s)}`);
+    if (i % 2 === 1) kb.row();
+  }
+  if (studios.length % 2 !== 0) kb.row();
+  kb.text('⬅️ Назад в «Смотрю»', 'list_watching').text('❌ Закрыть', 'close_menu');
+
+  const text = [
+    '🎙 <b>Настройка индивидуальной озвучки</b>',
+    `📺 <b>${escapeHtml(title)}</b>`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    'Текущая озвучка: <i>Не выбрана (по умолчанию)</i>',
+    '',
+    '<i>Выберите студию из озвучивающих этот тайтл на AnimeLib:</i>',
+  ].join('\n');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
 });
 
 // Callback: Back to Titles
