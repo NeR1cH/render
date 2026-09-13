@@ -129,7 +129,12 @@ export function extractDirectStreamUrl(
       const itemHost = (typeof item === 'object' && item.host) || host || 'video.animelib.me';
       const q = typeof item === 'object' && item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : '1080p');
 
-      // Если путь начинается со слэша '/' — объединяем с host (по умолчанию video.animelib.me)
+      // Если путь начинается с '//' — это protocol-relative URL (например //kodikplayer.com/...)
+      if (trimmed.startsWith('//')) {
+        return { url: normalizeVideoUrl(trimmed), quality: q };
+      }
+
+      // Если путь начинается с одного слэша '/' — объединяем с host (по умолчанию video.animelib.me)
       if (trimmed.startsWith('/')) {
         const cleanHost = String(itemHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const fullUrl = `https://${cleanHost}${trimmed}`;
@@ -161,7 +166,12 @@ export function extractDirectStreamUrl(
       const trimmed = val.trim();
       if (!trimmed || /^\d+$/.test(trimmed)) return null;
 
-      // Относительный путь манифеста с хостом
+      // Protocol-relative URL (начинается с //)
+      if (trimmed.startsWith('//')) {
+        return { url: normalizeVideoUrl(trimmed), quality: qualityHint };
+      }
+
+      // Относительный путь манифеста с хостом (начинается с одного слэша /)
       const h = currentHost || host || 'video.animelib.me';
       if (trimmed.startsWith('/')) {
         const cleanHost = String(h).replace(/^https?:\/\//, '').replace(/\/+$/, '');

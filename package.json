@@ -14,6 +14,8 @@
     "bot:check": "tsx scripts/test-shikimori-rate.ts",
     "bridge": "tsx scripts/ai-bridge.ts",
     "test:shikimori": "tsx scripts/test-shikimori-rate.ts",
+    "test:suite": "tsx src/test-suite.ts",
+    "test": "tsx src/test-suite.ts",
     "ai:bridge": "tsx scripts/ai-bridge.ts"
   },
   "dependencies": {
