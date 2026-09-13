@@ -3,7 +3,7 @@ import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { dbService, DownloadQueueRecord } from '../db/database';
-import { animelibService, ANIMELIB_WEB_URL } from './animelib';
+import { animelibService, ANIMELIB_WEB_URL, isValidVideoUrl } from './animelib';
 
 // Настройка пути к бинарнику FFmpeg (системный бинарник имеет приоритет над @ffmpeg-installer)
 try {
@@ -201,9 +201,9 @@ export class DownloaderService {
             task.voiceover || undefined
           );
 
-          if (!videoLink || !videoLink.url) {
+          if (!videoLink || !videoLink.url || !isValidVideoUrl(videoLink.url)) {
             console.warn(
-              `[Downloader] ❌ Не удалось разрешить видеопоток для задачи #${task.id} (Media ${task.media_id}, Ep ${task.episode})`
+              `[Downloader] ❌ Не удалось разрешить валидный URL видеопотока для задачи #${task.id} (Media ${task.media_id}, Ep ${task.episode}, URL: ${videoLink?.url || 'пусто'})`
             );
             dbService.updateDownloadStatus(task.id, 'error', 0);
             continue;

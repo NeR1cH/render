@@ -27,6 +27,129 @@ export interface DirectVideoLinkResult {
   headers?: Record<string, string>;
 }
 
+export const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+
+/**
+ * Строгая валидация URL видеопотока.
+ * URL видеопотока считается валидным, только если он начинается с http://, https:// или //.
+ * Любые сырые ID (числа, строки из одних цифр вроде 166752, пустые значения) строго отклоняются.
+ */
+export function isValidVideoUrl(url: any): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  // Сырые ID (только цифры) не являются валидным URL
+  if (/^\d+$/.test(trimmed)) return false;
+  // Валидный URL должен начинаться с http://, https:// или //
+  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('//');
+}
+
+/**
+ * Нормализация URL видеопотока (превращает // в https://)
+ */
+export function normalizeVideoUrl(url: string): string {
+  const trimmed = url.trim();
+  if (trimmed.startsWith('//')) {
+    return 'https:' + trimmed;
+  }
+  return trimmed;
+}
+
+/**
+ * Извлечение валидного URL и качества из вложенных структур плеера
+ * (проверяет qualities, video, src, url, file, stream, host и вложенные объекты)
+ */
+export function extractDirectStreamUrl(
+  pl: any,
+  defaultHost?: string
+): { url: string; quality?: string } | null {
+  if (!pl) return null;
+
+  const host = pl.host || defaultHost;
+
+  const tryUrl = (val: any, qualityHint?: string): { url: string; quality?: string } | null => {
+    if (!val) return null;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (isValidVideoUrl(trimmed)) {
+        return { url: normalizeVideoUrl(trimmed), quality: qualityHint };
+      }
+      // Если строка - относительный путь манифеста и известен хост
+      if (host && (trimmed.startsWith('/') || trimmed.includes('.m3u8') || trimmed.includes('.mp4'))) {
+        const cleanHost = String(host).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        const cleanPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+        const combined = `https://${cleanHost}${cleanPath}`;
+        if (isValidVideoUrl(combined)) {
+          return { url: combined, quality: qualityHint };
+        }
+      }
+    }
+    return null;
+  };
+
+  // 1. Проверяем pl.qualities
+  if (pl.qualities) {
+    if (Array.isArray(pl.qualities)) {
+      const sorted = [...pl.qualities].sort((a, b) => (b.resolution || b.quality || 0) - (a.resolution || a.quality || 0));
+      for (const qItem of sorted) {
+        const urlCandidate = qItem.url || qItem.src || qItem.file || qItem.link || qItem.stream;
+        const qLabel = qItem.resolution ? `${qItem.resolution}p` : (qItem.quality ? `${qItem.quality}` : undefined);
+        const res = tryUrl(urlCandidate, qLabel);
+        if (res) return res;
+      }
+    } else if (typeof pl.qualities === 'object') {
+      const qKeys = ['1080', '720', '480', '360', '1080p', '720p', '480p', '360p'];
+      for (const k of qKeys) {
+        if (pl.qualities[k]) {
+          const res = tryUrl(pl.qualities[k], k.includes('p') ? k : `${k}p`);
+          if (res) return res;
+        }
+      }
+      for (const [k, v] of Object.entries(pl.qualities)) {
+        const res = tryUrl(v, k);
+        if (res) return res;
+      }
+    }
+  }
+
+  // 2. Проверяем pl.video
+  if (pl.video) {
+    if (typeof pl.video === 'string') {
+      const res = tryUrl(pl.video);
+      if (res) return res;
+    } else if (typeof pl.video === 'object') {
+      const qKeys = ['1080', '720', '480', '360', '1080p', '720p', '480p', '360p'];
+      for (const k of qKeys) {
+        if (pl.video[k]) {
+          const res = tryUrl(pl.video[k], k.includes('p') ? k : `${k}p`);
+          if (res) return res;
+        }
+      }
+      for (const key of ['src', 'url', 'file', 'link', 'hls', 'manifest']) {
+        if (pl.video[key]) {
+          const res = tryUrl(pl.video[key]);
+          if (res) return res;
+        }
+      }
+      for (const subVal of Object.values(pl.video)) {
+        const res = tryUrl(subVal);
+        if (res) return res;
+      }
+    }
+  }
+
+  // 3. Проверяем прямые свойства
+  for (const prop of ['src', 'url', 'file', 'stream', 'link', 'hls']) {
+    if (pl[prop]) {
+      const res = tryUrl(pl[prop]);
+      if (res) return res;
+    }
+  }
+
+  return null;
+}
+
 export function decodeKodikSrc(encoded: string): string {
   if (!encoded) return '';
   if (encoded.includes('//')) return encoded;
@@ -45,23 +168,19 @@ export function decodeKodikSrc(encoded: string): string {
 
 export function isNativeStreamPlayer(pl: any): boolean {
   if (!pl) return false;
+  // Если у плеера есть валидный прямой URL потока (не Kodik)
+  const extracted = extractDirectStreamUrl(pl);
+  if (extracted && isValidVideoUrl(extracted.url)) {
+    const u = extracted.url.toLowerCase();
+    if ((u.includes('.m3u8') || u.includes('.mp4')) && !u.includes('kodik') && !u.includes('/seria/')) {
+      return true;
+    }
+  }
   const pName = (pl.player || '').toLowerCase();
   if (pName.includes('libplayer') || pName.includes('cloudcdn') || pName.includes('animelib')) {
     return true;
   }
-  const checkUrl = (urlVal: any): boolean => {
-    if (!urlVal) return false;
-    if (typeof urlVal === 'string') {
-      const u = urlVal.toLowerCase();
-      if ((u.includes('.m3u8') || u.includes('.mp4')) && !u.includes('kodik') && !u.includes('/seria/')) {
-        return true;
-      }
-    } else if (typeof urlVal === 'object') {
-      return Object.values(urlVal).some((v) => checkUrl(v));
-    }
-    return false;
-  };
-  return checkUrl(pl.video) || checkUrl(pl.src) || checkUrl(pl.url) || checkUrl(pl.file) || checkUrl(pl.stream);
+  return false;
 }
 
 export function parseEpisodeNumber(val: any): number {
@@ -493,12 +612,10 @@ export class AnimeLibService {
       }
 
       const parsedUrl = new URL(pageUrl);
-      const defaultUserAgent =
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
 
       const getRes = await axios.get(pageUrl, {
         headers: {
-          'User-Agent': defaultUserAgent,
+          'User-Agent': DEFAULT_USER_AGENT,
           'Referer': `${ANIMELIB_WEB_URL}/`,
           'Origin': ANIMELIB_WEB_URL,
         },
@@ -518,7 +635,7 @@ export class AnimeLibService {
           format: directM3u8Match[1].includes('.m3u8') ? 'm3u8' : 'mp4',
           headers: {
             'Referer': 'https://kodikplayer.com/',
-            'User-Agent': defaultUserAgent,
+            'User-Agent': DEFAULT_USER_AGENT,
           },
         };
       }
@@ -591,7 +708,7 @@ export class AnimeLibService {
       const postUrl = new URL('/ftor', parsedUrl.origin).href;
       const postRes = await axios.post(postUrl, new URLSearchParams(postData).toString(), {
         headers: {
-          'User-Agent': defaultUserAgent,
+          'User-Agent': DEFAULT_USER_AGENT,
           'Referer': pageUrl,
           'Origin': parsedUrl.origin,
           'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -624,9 +741,11 @@ export class AnimeLibService {
       }
 
       let finalStreamUrl = decodeKodikSrc(chosenRaw).trim();
-      if (finalStreamUrl.startsWith('//')) {
-        finalStreamUrl = 'https:' + finalStreamUrl;
+      if (!isValidVideoUrl(finalStreamUrl)) {
+        console.warn(`[AnimeLib] Kodik /ftor вернул невалидный URL: ${finalStreamUrl}`);
+        return null;
       }
+      finalStreamUrl = normalizeVideoUrl(finalStreamUrl);
 
       return {
         url: finalStreamUrl,
@@ -634,7 +753,7 @@ export class AnimeLibService {
         format: finalStreamUrl.includes('.m3u8') ? 'm3u8' : 'mp4',
         headers: {
           'Referer': 'https://kodikplayer.com/',
-          'User-Agent': defaultUserAgent,
+          'User-Agent': DEFAULT_USER_AGENT,
         },
       };
     } catch (kodikErr: any) {
@@ -644,10 +763,55 @@ export class AnimeLibService {
   }
 
   /**
+   * Разрешение числового ID видео в HAPI v2 через эндпоинты /episodes/players/${id} или /video/${id}
+   */
+  async resolveNumericVideoId(
+    id: string | number,
+    player?: any,
+    episodeId?: number
+  ): Promise<{ url: string; quality?: string } | null> {
+    const headers = {
+      ...this.getAuthHeaders(),
+      'Site-Id': '5',
+      'Referer': `${ANIMELIB_WEB_URL}/`,
+      'Origin': ANIMELIB_WEB_URL,
+    };
+
+    const endpoints: string[] = [];
+    if (player?.id) {
+      endpoints.push(`/episodes/players/${player.id}`);
+    }
+    if (id) {
+      endpoints.push(`/episodes/players/${id}`);
+      endpoints.push(`/video/${id}`);
+    }
+    if (episodeId && player?.id) {
+      endpoints.push(`/episodes/${episodeId}/players/${player.id}`);
+    }
+
+    for (const ep of endpoints) {
+      try {
+        const res = await this.client.get(ep, { headers, timeout: 8000 });
+        const data = res.data?.data || res.data;
+        if (data) {
+          const host = data.host || player?.host;
+          const extracted = extractDirectStreamUrl(data, host);
+          if (extracted && isValidVideoUrl(extracted.url)) {
+            return extracted;
+          }
+        }
+      } catch {}
+    }
+
+    return null;
+  }
+
+  /**
    * Получение прямой ссылки на видеопоток (m3u8/mp4/stream) из плеера AnimeLib.
    * Обращается к эндпоинтам эпизодов, находит нужный эпизод, приоритезирует плееры
    * (предпочитая нативные стримы LibPlayer/CloudCDN, затем Kodik с резолвом потока)
    * и возвращает прямую ссылку на медиапоток и нужные HTTP-заголовки.
+   * Гарантирует возвращение только валидного HTTP(S) URL.
    */
   async getDirectVideoLink(
     mediaId: number | string,
@@ -723,7 +887,6 @@ export class AnimeLibService {
       }
 
       // 4. Приоритезация и отбор подходящих плееров
-      // Приоритет отдается нативным стримам AnimeLib (LibPlayer, CloudCDN, прямые .m3u8/.mp4)
       const sortedPlayers = [...players].sort((a, b) => {
         // Если указана озвучка, проверяем соответствие
         if (targetVoiceover && targetVoiceover.trim()) {
@@ -751,88 +914,100 @@ export class AnimeLibService {
         return 0;
       });
 
-      // Перебираем кандидатов плееров, пока не найдем рабочий стрим
+      // Перебираем кандидатов плееров, пока не найдем рабочий стрим с валидным URL
       for (const player of sortedPlayers) {
-        let rawUrl = '';
+        let streamUrl = '';
         let detectedQuality = '720p';
 
-        // Проверяем объект video (разные качества)
-        if (player.video) {
-          if (typeof player.video === 'string') {
-            rawUrl = player.video;
-          } else if (typeof player.video === 'object') {
-            const qualities = ['1080', '720', '480', '360'];
-            for (const q of qualities) {
-              if (player.video[q]) {
-                rawUrl = player.video[q];
-                detectedQuality = `${q}p`;
-                break;
-              }
-            }
-            if (!rawUrl && Object.values(player.video).length > 0) {
-              rawUrl = String(Object.values(player.video)[0]);
+        // 1. Проверяем вложенные структуры плеера (video, src, host, qualities, etc.)
+        const extracted = extractDirectStreamUrl(player);
+        if (extracted && isValidVideoUrl(extracted.url)) {
+          streamUrl = normalizeVideoUrl(extracted.url);
+          if (extracted.quality) detectedQuality = extracted.quality;
+        }
+
+        // 2. Если валидного сетевого URL нет, проверяем, не передан ли числовой ID (например, 166752)
+        if (!streamUrl) {
+          const rawVideo = player.video;
+          const rawSrc = player.src;
+          const rawId = player.id;
+          const rawVideoId = player.video_id;
+
+          const numericIdCandidate =
+            (typeof rawVideo === 'number' || (typeof rawVideo === 'string' && /^\d+$/.test(rawVideo.trim())))
+              ? String(rawVideo).trim()
+              : ((typeof rawVideoId === 'number' || (typeof rawVideoId === 'string' && /^\d+$/.test(String(rawVideoId).trim())))
+                ? String(rawVideoId).trim()
+                : ((typeof rawSrc === 'string' && /^\d+$/.test(rawSrc.trim()))
+                  ? rawSrc.trim()
+                  : (rawId && /^\d+$/.test(String(rawId).trim()) ? String(rawId).trim() : null)));
+
+          if (numericIdCandidate) {
+            console.log(
+              `[AnimeLib] Плеер ${player.player || 'AnimeLib'} содержит числовой ID (${numericIdCandidate}) вместо ссылки. Разрешаем через API...`
+            );
+            const resolvedApi = await this.resolveNumericVideoId(numericIdCandidate, player, matchingEp?.id);
+            if (resolvedApi && isValidVideoUrl(resolvedApi.url)) {
+              streamUrl = normalizeVideoUrl(resolvedApi.url);
+              if (resolvedApi.quality) detectedQuality = resolvedApi.quality;
             }
           }
         }
 
-        // Проверяем поля src, url, file, stream
-        if (!rawUrl) {
-          rawUrl = player.src || player.url || player.file || player.stream || '';
-        }
-
-        if (!rawUrl) {
+        // 3. Строгая валидация URL потока:
+        // Если streamUrl не начинается с http://, https:// или //, он НЕ считается валидным URL!
+        // Переходим к следующему плееру в sortedPlayers (fallback на Kodik или другие доступные плееры)
+        if (!isValidVideoUrl(streamUrl)) {
+          console.warn(
+            `[AnimeLib] Плеер #${player.id || 'N/A'} (${player.player || 'Unknown'}, ${player.team?.name || 'Без студии'}) вернул невалидный URL («${streamUrl || player.video || player.src || 'пусто'}»). Переходим к следующему плееру...`
+          );
           continue;
         }
 
-        let trimmedUrl = rawUrl.trim();
-        if (trimmedUrl.startsWith('//')) {
-          trimmedUrl = 'https:' + trimmedUrl;
-        }
+        const normalizedUrl = normalizeVideoUrl(streamUrl);
 
-        // Проверяем, является ли ссылка Kodik или встраиваемым фреймом
+        // 4. Проверяем, является ли ссылка Kodik фреймом или страницей плеера
         const isKodik =
-          trimmedUrl.includes('kodikplayer.com') ||
-          trimmedUrl.includes('kodik.info') ||
-          trimmedUrl.includes('/seria/') ||
+          normalizedUrl.includes('kodikplayer.com') ||
+          normalizedUrl.includes('kodik.info') ||
+          normalizedUrl.includes('/seria/') ||
           (player.player || '').toLowerCase().includes('kodik');
 
         if (isKodik) {
-          console.log(`[AnimeLib] Разрешаем реальный HLS-манифест из Kodik плеера: ${trimmedUrl}`);
-          const resolvedKodik = await this.resolveKodikStream(trimmedUrl);
-          if (resolvedKodik && resolvedKodik.url) {
+          console.log(`[AnimeLib] Разрешаем реальный HLS-манифест из Kodik плеера: ${normalizedUrl}`);
+          const resolvedKodik = await this.resolveKodikStream(normalizedUrl);
+          if (resolvedKodik && isValidVideoUrl(resolvedKodik.url)) {
             return {
-              url: resolvedKodik.url,
+              url: normalizeVideoUrl(resolvedKodik.url),
               quality: resolvedKodik.quality || detectedQuality,
               voiceover: player.team?.name || targetVoiceover || undefined,
               playerType: player.player || 'Kodik',
               format: resolvedKodik.format || 'm3u8',
               headers: resolvedKodik.headers || {
                 'Referer': 'https://kodikplayer.com/',
-                'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+                'User-Agent': DEFAULT_USER_AGENT,
               },
             };
           }
-          // Если разрешение Kodik не удалось, продолжаем поиск следующего плеера
-          console.warn(`[AnimeLib] Не удалось извлечь манифест из Kodik плеера ${player.id}, проверяем следующий`);
+          console.warn(`[AnimeLib] Не удалось извлечь рабочий манифест из Kodik плеера #${player.id}, проверяем следующий...`);
           continue;
         }
 
-        // Нативный стрим AnimeLib (LibPlayer, CloudCDN, прямой .m3u8 или .mp4)
+        // 5. Нативный стрим AnimeLib (прямой .m3u8, .mp4 или потоковый HTTP URL)
         let format: 'm3u8' | 'mp4' | 'stream' = 'stream';
-        if (trimmedUrl.includes('.m3u8')) {
+        if (normalizedUrl.includes('.m3u8')) {
           format = 'm3u8';
-        } else if (trimmedUrl.includes('.mp4')) {
+        } else if (normalizedUrl.includes('.mp4')) {
           format = 'mp4';
         }
 
-        const qualMatch = trimmedUrl.match(/\b(1080|720|480|360)p?\b/i);
+        const qualMatch = normalizedUrl.match(/\b(1080|720|480|360)p?\b/i);
         if (qualMatch) {
           detectedQuality = `${qualMatch[1]}p`;
         }
 
         return {
-          url: trimmedUrl,
+          url: normalizedUrl,
           quality: detectedQuality,
           voiceover: player.team?.name || targetVoiceover || undefined,
           playerType: player.player || 'AnimeLib',
@@ -840,8 +1015,7 @@ export class AnimeLibService {
           headers: {
             'Referer': `${ANIMELIB_WEB_URL}/`,
             'Origin': ANIMELIB_WEB_URL,
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+            'User-Agent': DEFAULT_USER_AGENT,
           },
         };
       }
