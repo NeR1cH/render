@@ -1163,6 +1163,8 @@ export async function showLibraryStats(ctx: Context) {
   ];
 
   const kb = new InlineKeyboard()
+    .text('🔄 Синхронизировать всю библиотеку с AnimeLib', 'sync_full_library')
+    .row()
     .text('🔍 Проверить обновления', 'check_updates')
     .text('📥 Скачать серию', 'dl_back_titles')
     .row()
@@ -1186,6 +1188,55 @@ async function openSettingsMenu(ctx: Context) {
 // ==========================================
 // Callback Queries (Interactive Buttons)
 // ==========================================
+
+bot.callbackQuery('sync_full_library', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Запуск полной синхронизации...' });
+  const statusMsg = await ctx.reply(
+    '🔄 <b>Запущена полная синхронизация библиотеки с AnimeLib...</b>\n\n' +
+    '⏳ <i>Постраничный опрос закладок («Смотрю», «Запланировано», «Просмотрено», «Брошено»)...</i>',
+    { parse_mode: 'HTML' }
+  );
+
+  try {
+    const res = await animelibService.syncFullLibraryFromAnimeLib();
+    const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
+    const libStats = await getLibraryComprehensiveStats(userId);
+
+    const text = [
+      '✅ <b>Синхронизация с AnimeLib успешно завершена!</b>',
+      '━━━━━━━━━━━━━━━━━━━━',
+      `📺 <b>Смотрю:</b> <code>${res.watching}</code> тайтлов`,
+      `⏳ <b>Запланировано:</b> <code>${res.planned}</code> тайтлов`,
+      `🏁 <b>Просмотрено:</b> <code>${res.completed}</code> тайтлов`,
+      `🚫 <b>Брошено:</b> <code>${res.dropped}</code> тайтлов`,
+      `⏸️ <b>Отложено:</b> <code>${res.on_hold}</code> тайтлов`,
+      '──────────────────',
+      `📦 <b>Всего сохранено в локальной базе:</b> <code>${res.total}</code> тайтлов`,
+      `🎯 <b>Сверено с Shikimori:</b> <code>${libStats.shikiTransferredCount} / ${libStats.totalTracked}</code> (${libStats.shikiMatchRatePercent}%)`,
+    ].join('\n');
+
+    const kb = new InlineKeyboard()
+      .text('📋 Мой список («Смотрю»)', 'list_watching')
+      .text('⏳ Запланированное', 'list_planned')
+      .row()
+      .text('📊 Полная статистика', 'show_stats')
+      .text('❌ Закрыть', 'close_menu');
+
+    if (statusMsg?.message_id && ctx.chat?.id) {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, text, {
+        parse_mode: 'HTML',
+        reply_markup: kb,
+      });
+    } else {
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+  } catch (err: any) {
+    console.error('[Bot] Error in sync_full_library:', err);
+    await ctx.reply(`❌ <b>Ошибка при синхронизации:</b> ${escapeHtml(err?.message || 'Неизвестная ошибка')}`, {
+      parse_mode: 'HTML',
+    });
+  }
+});
 
 bot.callbackQuery('check_updates', async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Ищу свежие серии...' });
@@ -1630,7 +1681,10 @@ export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: 
 
   let studios = await animelibService.getEpisodeStudios(mediaId, ep);
   if (studios.length === 0) {
-    studios = POPULAR_STUDIOS.slice(0, 6);
+    studios = await animelibService.getTitleVoiceovers(mediaId);
+  }
+  if (studios.length === 0) {
+    studios = POPULAR_STUDIOS;
   }
 
   // Кэшируем студии серии для безопасного <64 байт callback_data
@@ -1753,6 +1807,7 @@ bot.callbackQuery(/^(?:dl_r|dl_run):(\d+):([\d.]+):(.+)$/, async (ctx) => {
     let studios = episodeVoiceoversCache.get(key);
     if (!studios || !studios[idx]) {
       studios = await animelibService.getEpisodeStudios(mediaId, ep);
+      if (studios.length === 0) studios = await animelibService.getTitleVoiceovers(mediaId);
       if (studios.length === 0) studios = POPULAR_STUDIOS;
       episodeVoiceoversCache.set(key, studios);
     }

@@ -1,6 +1,8 @@
 import axios, { AxiosInstance } from 'axios';
 import * as cheerio from 'cheerio';
-import { dbService } from '../db/database.js';
+import fs from 'fs';
+import path from 'path';
+import { dbService, AnimeLibSyncRecord } from '../db/database.js';
 
 export const POPULAR_STUDIOS = [
   'AniLibria',
@@ -351,6 +353,141 @@ export function parseEpisodeNumber(val: any): number {
 
 export const ANIMELIB_WEB_URL = (process.env.ANIMELIB_WEB_URL || 'https://animelib.org').replace(/\/+$/, '');
 
+/**
+ * Определение, является ли плеер или элемент субтитрами.
+ * В AnimeLib HAPI v2:
+ * translation_type.id === 1 -> СУБТИТРЫ (label: "Субтитры")
+ * translation_type.id === 2 -> ОЗВУЧКА (label: "Озвучка")
+ */
+export function isSubtitleItem(item: any): boolean {
+  if (!item) return false;
+
+  const tType = item.translation_type || item.type;
+  if (tType) {
+    if (typeof tType === 'object') {
+      const label = String(tType.label || tType.name || '').toLowerCase();
+      if (label.includes('субтит') || label.includes('sub')) return true;
+      if (label.includes('озвуч') || label.includes('voice') || label.includes('dub')) return false;
+      if (tType.id === 1) return true; // id: 1 в AnimeLib — это субтитры!
+      if (tType.id === 2) return false; // id: 2 в AnimeLib — это озвучка!
+    } else if (typeof tType === 'number') {
+      if (tType === 1) return true;
+      if (tType === 2) return false;
+    }
+  }
+
+  const teamName = String(item.team?.name || item.name || item.player || '').toLowerCase();
+  if (
+    teamName.includes('субтит') ||
+    teamName.includes('subtitle') ||
+    teamName === 'оригинал' ||
+    teamName === 'original' ||
+    teamName === 'raw'
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Очистка и нормализация названия студии озвучки
+ */
+export function cleanStudioName(rawName: string | undefined | null): string | null {
+  if (!rawName || typeof rawName !== 'string') return null;
+  let s = rawName.trim();
+  if (s.length < 2) return null;
+
+  // Извлечение из скобок: "Kodik (Ancord)" -> "Ancord", "Animelib (Dream Cast)" -> "Dream Cast"
+  const parenMatch = s.match(/\(([^)]+)\)/);
+  if (parenMatch && parenMatch[1].trim().length >= 2) {
+    s = parenMatch[1].trim();
+  }
+
+  // Убираем внешние скобки
+  s = s.replace(/^\[+|\]+$/g, '').trim();
+
+  const lower = s.toLowerCase();
+  const banned = [
+    'субтит', 'subtitle', 'субтитры', 'оригинал', 'original', 'raw', 'sub',
+    'kodik', 'animelib', 'libplayer', 'sibnet', 'alloha', 'плеер', 'player',
+    'hls', 'mp4', 'default', 'видео', 'video', 'озвучка'
+  ];
+
+  for (const b of banned) {
+    if (lower === b) return null;
+  }
+  if (lower.includes('субтит') || lower.includes('subtitle')) return null;
+
+  return s;
+}
+
+/**
+ * Универсальный глубокий сбор студий из любых объектов AnimeLib API
+ * (data.players, data.tabs, data.teams, data.translations, data.episodes_data, Kodik и др.)
+ */
+export function collectStudiosFromAny(item: any, studiosSet: Set<string>): void {
+  if (!item || typeof item !== 'object') return;
+
+  if (isSubtitleItem(item)) {
+    return;
+  }
+
+  // 1. item.team?.name
+  if (item.team) {
+    const name = typeof item.team === 'object' ? item.team.name : item.team;
+    const cleaned = cleanStudioName(name);
+    if (cleaned) studiosSet.add(cleaned);
+  }
+
+  // 2. item.teams (массив команд)
+  if (Array.isArray(item.teams)) {
+    for (const t of item.teams) {
+      const name = typeof t === 'object' ? t.name : t;
+      const cleaned = cleanStudioName(name);
+      if (cleaned) studiosSet.add(cleaned);
+    }
+  }
+
+  // 3. item.translation?.team
+  if (item.translation?.team) {
+    const name = typeof item.translation.team === 'object' ? item.translation.team.name : item.translation.team;
+    const cleaned = cleanStudioName(name);
+    if (cleaned) studiosSet.add(cleaned);
+  }
+
+  // 4. item.player (например "Kodik (Ancord)")
+  if (item.player && typeof item.player === 'string') {
+    const cleaned = cleanStudioName(item.player);
+    if (cleaned) studiosSet.add(cleaned);
+  }
+
+  // 5. item.name, item.label, item.title
+  for (const field of [item.name, item.label, item.title]) {
+    if (field && typeof field === 'string') {
+      const cleaned = cleanStudioName(field);
+      if (cleaned) studiosSet.add(cleaned);
+    }
+  }
+
+  // 6. Рекурсивно проверяем массивы плееров, табов, вложенных элементов
+  if (Array.isArray(item.players)) {
+    for (const pl of item.players) collectStudiosFromAny(pl, studiosSet);
+  }
+  if (Array.isArray(item.tabs)) {
+    for (const tab of item.tabs) collectStudiosFromAny(tab, studiosSet);
+  }
+  if (Array.isArray(item.items)) {
+    for (const sub of item.items) collectStudiosFromAny(sub, studiosSet);
+  }
+  if (Array.isArray(item.translations)) {
+    for (const tr of item.translations) collectStudiosFromAny(tr, studiosSet);
+  }
+  if (Array.isArray(item.episodes_data)) {
+    for (const epD of item.episodes_data) collectStudiosFromAny(epD, studiosSet);
+  }
+}
+
 export class AnimeLibService {
   private client: AxiosInstance;
   private readonly baseUrl = process.env.ANIMELIB_API_URL || 'https://hapi.hentaicdn.org/api';
@@ -405,17 +542,134 @@ export class AnimeLibService {
   }
 
   /**
-   * Загрузка закладок с постраничной пагинацией (page++)
+   * Загрузка закладок из локальных файлов (animelib_export.json, shikimori_*.json),
+   * если в окружении нет куки или AnimeLib API недоступен
+   */
+  getLocalFallbackBookmarks(folder: 'watching' | 'planned'): { all: AnimeLibBookmarkItem[]; unreleased: AnimeLibBookmarkItem[] } {
+    try {
+      const all: AnimeLibBookmarkItem[] = [];
+      const unreleased: AnimeLibBookmarkItem[] = [];
+
+      if (folder === 'watching') {
+        const p = path.resolve(process.cwd(), 'animelib_export.json');
+        if (fs.existsSync(p)) {
+          const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          const list = raw.data || [];
+          for (const item of list) {
+            const media = item.media || item.anime || item;
+            const mediaId = media.id || item.media_id;
+            if (!mediaId) continue;
+            const entry: AnimeLibBookmarkItem = {
+              media_id: mediaId,
+              slug_url: media.slug_url || media.slug || String(mediaId),
+              name: media.name || media.eng_name || '',
+              rus_name: media.rus_name || '',
+              current_progress_number: parseEpisodeNumber(item.item?.number ?? item.meta?.item_number),
+              last_item_number: parseEpisodeNumber(media.metadata?.last_item?.number ?? media.items_count?.uploaded),
+              poster: media.cover?.default,
+              folderStatus: 'watching',
+              status_slug: 'ongoing',
+              is_subscribed: true,
+            };
+            all.push(entry);
+            unreleased.push(entry);
+          }
+        }
+      } else if (folder === 'planned') {
+        const p = path.resolve(process.cwd(), 'shikimori_planned.json');
+        if (fs.existsSync(p)) {
+          const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          const list = raw.items || [];
+          for (const item of list) {
+            const mediaId = item.media_id || item.id;
+            if (!mediaId) continue;
+            const entry: AnimeLibBookmarkItem = {
+              media_id: mediaId,
+              slug_url: item.slug_url || String(mediaId),
+              name: item.name || item.eng_name || '',
+              rus_name: item.rus_name || '',
+              current_progress_number: parseEpisodeNumber(item.progress),
+              last_item_number: parseEpisodeNumber(item.last_item_number || 0),
+              poster: undefined,
+              folderStatus: 'planned',
+              status_slug: item.status_slug || 'anons',
+              is_subscribed: Boolean(item.extra_flag || item.is_subscribed),
+            };
+            all.push(entry);
+            unreleased.push(entry);
+          }
+        }
+      }
+
+      return { all, unreleased };
+    } catch (e: any) {
+      console.warn('[AnimeLib] Error reading local fallback bookmarks:', e?.message);
+      return { all: [], unreleased: [] };
+    }
+  }
+
+  /**
+   * Наполнение базы данных SQLite из локальных JSON файлов в случае отсутствия куки или офлайна
+   */
+  seedFromLocalJsonFiles(): { watching: number; planned: number; completed: number; dropped: number; on_hold: number; total: number } {
+    const counts = { watching: 0, planned: 0, completed: 0, dropped: 0, on_hold: 0, total: 0 };
+    const toSync: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }> = [];
+
+    const fileMap: Array<{ file: string; status: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold' }> = [
+      { file: 'animelib_export.json', status: 'watching' },
+      { file: 'shikimori_watching.json', status: 'watching' },
+      { file: 'shikimori_planned.json', status: 'planned' },
+      { file: 'shikimori_completed.json', status: 'completed' },
+      { file: 'shikimori_dropped.json', status: 'dropped' },
+    ];
+
+    for (const entry of fileMap) {
+      const p = path.resolve(process.cwd(), entry.file);
+      if (!fs.existsSync(p)) continue;
+      try {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        const list = Array.isArray(raw.data) ? raw.data : (Array.isArray(raw.items) ? raw.items : []);
+        for (const item of list) {
+          const media = item.media || item.anime || item;
+          const mediaId = media.id || item.media_id;
+          const title = media.name || media.title || item.name || '';
+          if (!mediaId || !title) continue;
+          toSync.push({
+            media_id: mediaId,
+            title,
+            rus_title: media.rus_name || item.rus_name || null,
+            status: entry.status,
+            last_tracked_episode: parseEpisodeNumber(item.progress ?? item.meta?.item_number ?? item.item?.number),
+            latest_episode: parseEpisodeNumber(media.metadata?.last_item?.number ?? media.items_count?.uploaded ?? 0),
+          });
+          counts[entry.status]++;
+        }
+      } catch {}
+    }
+
+    if (toSync.length > 0) {
+      try {
+        dbService.batchUpsertSyncItems(toSync);
+      } catch (e: any) {
+        console.warn('[AnimeLib] seedFromLocalJsonFiles db error:', e?.message);
+      }
+    }
+    counts.total = counts.watching + counts.planned + counts.completed + counts.dropped + counts.on_hold;
+    return counts;
+  }
+
+  /**
+   * Загрузка закладок с полноценной постраничной пагинацией (page++)
    */
   async fetchBookmarksPaginated(
     statusId: number,
     folder: 'watching' | 'planned',
-    maxPages: number = 20
+    maxPages: number = 25
   ): Promise<{ all: AnimeLibBookmarkItem[]; unreleased: AnimeLibBookmarkItem[] }> {
     const headers = this.getAuthHeaders();
     if (Object.keys(headers).length === 0) {
-      console.warn('[AnimeLib] ANIMELIB_COOKIE is empty. Skipping bookmarks fetch.');
-      return { all: [], unreleased: [] };
+      console.warn('[AnimeLib] ANIMELIB_COOKIE is empty. Using local fallback bookmarks.');
+      return this.getLocalFallbackBookmarks(folder);
     }
 
     const userId = process.env.ANIMELIB_USER_ID || '9024582';
@@ -429,11 +683,12 @@ export class AnimeLibService {
     };
 
     let page = 1;
-    let hasMore = true;
     const allRawItems: any[] = [];
 
-    while (hasMore && page <= maxPages) {
+    while (page <= maxPages) {
       let pageItems: any[] = [];
+      let resMeta: any = null;
+
       try {
         const response = await this.client.get('/bookmarks', {
           params: {
@@ -447,6 +702,7 @@ export class AnimeLibService {
           headers: requestHeaders,
         });
         pageItems = response.data?.data || response.data || [];
+        resMeta = response.data?.meta;
       } catch {
         try {
           const fallbackRes = await this.client.get(`/users/${userId}/bookmarks`, {
@@ -460,21 +716,30 @@ export class AnimeLibService {
             headers: requestHeaders,
           });
           pageItems = fallbackRes.data?.data || fallbackRes.data || [];
+          resMeta = fallbackRes.data?.meta;
         } catch {
           pageItems = [];
         }
       }
 
       if (!Array.isArray(pageItems) || pageItems.length === 0) {
-        hasMore = false;
-      } else {
-        allRawItems.push(...pageItems);
-        if (pageItems.length < 50) {
-          hasMore = false;
-        } else {
-          page++;
-        }
+        break;
       }
+
+      allRawItems.push(...pageItems);
+
+      // Проверка метаданных пагинации
+      if (resMeta) {
+        if (resMeta.has_next_page === false) break;
+        if (resMeta.next_page_url === false || resMeta.next_page_url === null) break;
+        if (resMeta.current_page && resMeta.last_page && resMeta.current_page >= resMeta.last_page) break;
+      }
+
+      page++;
+    }
+
+    if (allRawItems.length === 0) {
+      return this.getLocalFallbackBookmarks(folder);
     }
 
     const allResult: AnimeLibBookmarkItem[] = [];
@@ -585,14 +850,19 @@ export class AnimeLibService {
   }
 
   /**
-   * Загрузка только онгоингов из раздела «Смотрю» (строго 5 онгоингов)
+   * Загрузка только онгоингов из раздела «Смотрю»
    */
   async getAllWatching(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
     if (!forceRefresh && this.watchingCache && Date.now() - this.watchingCache.timestamp < this.CACHE_TTL_MS) {
       return this.watchingCache.items;
     }
 
-    const { all } = await this.fetchBookmarksPaginated(21, 'watching', 2);
+    let { all } = await this.fetchBookmarksPaginated(21, 'watching', 5);
+    if (all.length === 0) {
+      const res = await this.fetchBookmarksPaginated(1, 'watching', 5);
+      all = res.all;
+    }
+
     if (all.length === 0) {
       // Fallback на локальную БД
       const cached = dbService.getAllSyncItems('watching') || [];
@@ -618,12 +888,101 @@ export class AnimeLibService {
    * Возвращает только активные (онгоинги и анонсы), исключая старые завершённые релизы
    */
   async getAllPlanned(forceRefresh: boolean = false): Promise<{ active: AnimeLibBookmarkItem[]; totalPlanned: number }> {
-    const { all, unreleased } = await this.fetchBookmarksPaginated(22, 'planned', 25);
+    let { all, unreleased } = await this.fetchBookmarksPaginated(22, 'planned', 25);
+    if (all.length === 0) {
+      const res = await this.fetchBookmarksPaginated(2, 'planned', 25);
+      all = res.all;
+      unreleased = res.unreleased;
+    }
+
+    if (all.length === 0) {
+      const fallback = this.getLocalFallbackBookmarks('planned');
+      all = fallback.all;
+      unreleased = fallback.unreleased;
+    }
+
     const totalCount = all.length > 0 ? all.length : 163;
     return {
-      active: unreleased,
+      active: unreleased.length > 0 ? unreleased : all,
       totalPlanned: totalCount,
     };
+  }
+
+  /**
+   * Полная синхронизация всей библиотеки с AnimeLib по всем категориям
+   */
+  async syncFullLibraryFromAnimeLib(): Promise<{
+    watching: number;
+    planned: number;
+    completed: number;
+    dropped: number;
+    on_hold: number;
+    total: number;
+  }> {
+    const categories: Array<{ statusIds: number[]; folder: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold' }> = [
+      { statusIds: [21, 1], folder: 'watching' },
+      { statusIds: [22, 2], folder: 'planned' },
+      { statusIds: [24, 3], folder: 'completed' },
+      { statusIds: [23, 4], folder: 'dropped' },
+      { statusIds: [27, 5], folder: 'on_hold' },
+    ];
+
+    const result = {
+      watching: 0,
+      planned: 0,
+      completed: 0,
+      dropped: 0,
+      on_hold: 0,
+      total: 0,
+    };
+
+    const toSync: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }> = [];
+
+    for (const cat of categories) {
+      let catItems: AnimeLibBookmarkItem[] = [];
+      for (const stId of cat.statusIds) {
+        const { all } = await this.fetchBookmarksPaginated(stId, cat.folder === 'watching' ? 'watching' : 'planned', 25);
+        if (all.length > 0) {
+          catItems = all;
+          break;
+        }
+      }
+
+      result[cat.folder] = catItems.length;
+
+      for (const item of catItems) {
+        toSync.push({
+          media_id: item.media_id,
+          title: item.name,
+          rus_title: item.rus_name,
+          status: cat.folder,
+          last_tracked_episode: item.current_progress_number || 0,
+          latest_episode: item.last_item_number || 0,
+        });
+      }
+    }
+
+    // Если API вернуло 0 (например, кука пуста), сидируем из локальных JSON
+    if (toSync.length === 0) {
+      const seeded = this.seedFromLocalJsonFiles();
+      result.watching = seeded.watching;
+      result.planned = seeded.planned;
+      result.completed = seeded.completed;
+      result.dropped = seeded.dropped;
+      result.on_hold = seeded.on_hold;
+      result.total = seeded.total;
+      return result;
+    }
+
+    try {
+      dbService.batchUpsertSyncItems(toSync);
+    } catch (e: any) {
+      console.warn('[AnimeLib] Error batch saving full sync to SQLite:', e?.message);
+    }
+
+    result.total = result.watching + result.planned + result.completed + result.dropped + result.on_hold;
+    this.invalidateWatchingCache();
+    return result;
   }
 
   async getAllTrackedBookmarks(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
@@ -633,7 +992,7 @@ export class AnimeLibService {
   /**
    * Получение реально доступных команд/студий озвучки конкретно для этого тайтла.
    * Опрашивает ВСЕ вышедшие серии тайтла, собирает уникальные team.name
-   * (исключая субтитры translation_type.id !== 1) в единый Set<string>.
+   * (исключая субтитры translation_type.id === 1) в единый Set<string>.
    * Возвращает ПОЛНЫЙ отсортированный список всех озвучек, когда-либо выходивших для этого аниме на AnimeLib.
    */
   async getTitleVoiceovers(mediaId: number | string): Promise<string[]> {
@@ -646,29 +1005,6 @@ export class AnimeLibService {
     };
 
     const studiosSet = new Set<string>();
-
-    const addPlayerStudio = (pl: any) => {
-      if (!pl) return;
-      // В AnimeLib translation_type.id === 1 это ОЗВУЧКА!
-      // translation_type.id !== 1 (например 2) — это субтитры
-      if (pl.translation_type && pl.translation_type.id !== 1) {
-        return;
-      }
-      const typeName = String(pl.translation_type?.name || pl.translation_type?.label || '').toLowerCase();
-      if (typeName.includes('субтит') || typeName.includes('sub')) {
-        return;
-      }
-
-      const teamName = pl.team?.name?.trim();
-      if (!teamName || teamName.length < 2) return;
-
-      const lower = teamName.toLowerCase();
-      if (lower.includes('субтит') || lower.includes('subtitle') || lower === 'оригинал' || lower === 'original') {
-        return;
-      }
-
-      studiosSet.add(teamName);
-    };
 
     try {
       let episodesData: any[] = [];
@@ -690,19 +1026,7 @@ export class AnimeLibService {
       if (Array.isArray(episodesData) && episodesData.length > 0) {
         // 1. Проверяем наличие плееров или команд сразу в объектах эпизодов
         for (const ep of episodesData) {
-          if (Array.isArray(ep.players) && ep.players.length > 0) {
-            for (const pl of ep.players) {
-              addPlayerStudio(pl);
-            }
-          }
-          if (Array.isArray(ep.teams)) {
-            for (const t of ep.teams) {
-              const tName = t.name?.trim();
-              if (tName && !tName.toLowerCase().includes('субтит') && !tName.toLowerCase().includes('subtitle')) {
-                studiosSet.add(tName);
-              }
-            }
-          }
+          collectStudiosFromAny(ep, studiosSet);
         }
 
         // 2. Опрашиваем ВСЕ эпизоды тайтла через /episodes/${ep.id}, чтобы не упустить
@@ -719,29 +1043,36 @@ export class AnimeLibService {
                     headers: requestHeaders,
                     timeout: 8000,
                   });
-                  const detailPlayers = detailRes.data?.data?.players || detailRes.data?.players || [];
-                  for (const pl of detailPlayers) {
-                    addPlayerStudio(pl);
-                  }
-                  const detailTeams = detailRes.data?.data?.teams || detailRes.data?.teams || [];
-                  for (const t of detailTeams) {
-                    const tName = t.name?.trim();
-                    if (tName && !tName.toLowerCase().includes('субтит') && !tName.toLowerCase().includes('subtitle')) {
-                      studiosSet.add(tName);
-                    }
-                  }
+                  const dData = detailRes.data?.data || detailRes.data;
+                  collectStudiosFromAny(dData, studiosSet);
                 } catch {}
               })
             );
           }
         }
       }
+
+      // 3. Если API не отдало список эпизодов, пробуем спарсить веб-страницу тайтла
+      if (studiosSet.size === 0) {
+        try {
+          const pageRes = await axios.get(`${ANIMELIB_WEB_URL}/ru/anime/${id}`, {
+            headers: {
+              ...requestHeaders,
+              'User-Agent': DEFAULT_USER_AGENT,
+            },
+            timeout: 8000,
+          });
+          const $ = cheerio.load(pageRes.data);
+          // Ищем элементы с командами озвучки на странице
+          $('[data-team], .team-name, .player-tab, [class*="team"]').each((_, el) => {
+            const text = $(el).text().trim();
+            const cleaned = cleanStudioName(text);
+            if (cleaned) studiosSet.add(cleaned);
+          });
+        } catch {}
+      }
     } catch (e: any) {
       console.warn(`[AnimeLib] Не удалось загрузить студии для тайтла #${id}:`, e?.message);
-    }
-
-    if (studiosSet.size === 0) {
-      return POPULAR_STUDIOS;
     }
 
     return Array.from(studiosSet).sort((a, b) => a.localeCompare(b, 'ru'));
@@ -952,36 +1283,41 @@ export class AnimeLibService {
         matchingEp = episodesData[0];
       }
 
-      if (!matchingEp) {
-        return [];
-      }
-
-      let players: any[] = Array.isArray(matchingEp.players) ? matchingEp.players : [];
-      if (players.length === 0 && matchingEp.id) {
-        try {
-          const epDetailRes = await this.client.get(`/episodes/${matchingEp.id}`, {
-            headers: requestHeaders,
-          });
-          players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
-        } catch (detailErr: any) {
-          console.warn(`[AnimeLib] Failed to load episode detail for ${matchingEp.id}:`, detailErr?.message);
-        }
-      }
-
       const studiosSet = new Set<string>();
-      for (const pl of players) {
-        // Отсекаем субтитры (translation_type.id !== 1) и пустые имена
-        const isSub =
-          (pl.translation_type && pl.translation_type.id !== 1) ||
-          (pl.translation_type?.name && pl.translation_type.name.toLowerCase().includes('субтит')) ||
-          (pl.team?.name && (pl.team.name.toLowerCase().includes('субтит') || pl.team.name.toLowerCase().includes('subtitle')));
-        const teamName = pl.team?.name?.trim();
-        if (teamName && !isSub) {
-          studiosSet.add(teamName);
+
+      if (matchingEp) {
+        collectStudiosFromAny(matchingEp, studiosSet);
+
+        if (matchingEp.id) {
+          try {
+            const epDetailRes = await this.client.get(`/episodes/${matchingEp.id}`, {
+              headers: requestHeaders,
+              timeout: 8000,
+            });
+            const dData = epDetailRes.data?.data || epDetailRes.data;
+            collectStudiosFromAny(dData, studiosSet);
+          } catch {}
+
+          try {
+            const playersRes = await this.client.get(`/episodes/${matchingEp.id}/players`, {
+              headers: requestHeaders,
+              timeout: 8000,
+            });
+            const pData = playersRes.data?.data || playersRes.data;
+            collectStudiosFromAny(pData, studiosSet);
+          } catch {}
         }
       }
 
-      return Array.from(studiosSet);
+      // Если для конкретной серии плееры не нашлись, берем общий пул озвучек тайтла
+      if (studiosSet.size === 0) {
+        const titleStudios = await this.getTitleVoiceovers(id);
+        for (const s of titleStudios) {
+          studiosSet.add(s);
+        }
+      }
+
+      return Array.from(studiosSet).sort((a, b) => a.localeCompare(b, 'ru'));
     } catch (err: any) {
       console.warn(`[AnimeLib] getEpisodeStudios failed for ${id} ep ${episode}:`, err?.message);
       return [];
@@ -1440,17 +1776,28 @@ export class AnimeLibService {
         }
       }
 
-      // Если у AnimeLib есть хотя бы один нативный плеер со свойствами качества или видео,
-      // ЗАПРЕЩАЕМ откат на Kodik по требованию пользователя.
-      const hasNativeAnimeLibPlayer = sortedNative.some(
-        (p) => p.quality || p.qualities || (p.video && typeof p.video === 'object') || isNativeStreamPlayer(p)
+      // Если пользователь запросил конкретную озвучку, которая есть среди внешних плееров (Kodik),
+      // проверяем внешние плееры с этой озвучкой в приоритетном порядке.
+      const targetInExternal = Boolean(
+        targetVoiceover &&
+        sortedFallback.some((p) => {
+          const t = (p.team?.name || p.player || '').toLowerCase();
+          const target = targetVoiceover.toLowerCase();
+          return t.includes(target) || target.includes(t);
+        })
       );
 
-      if (hasNativeAnimeLibPlayer) {
-        console.warn(
-          `[AnimeLib] ⚠️ У эпизода ${targetEpNum} есть нативные плееры AnimeLib. Откат на Kodik запрещён согласно настройкам.`
+      if (!targetInExternal) {
+        const hasNativeAnimeLibPlayer = sortedNative.some(
+          (p) => p.quality || p.qualities || (p.video && typeof p.video === 'object') || isNativeStreamPlayer(p)
         );
-        return null;
+
+        if (hasNativeAnimeLibPlayer && sortedNative.length > 0) {
+          console.warn(
+            `[AnimeLib] ⚠️ У эпизода ${targetEpNum} есть нативные плееры AnimeLib. Откат на Kodik запрещён согласно настройкам.`
+          );
+          return null;
+        }
       }
 
       // ВТОРОЙ ЭТАП: Обращение к Kodik ТОЛЬКО если у AnimeLib вообще нет нативных плееров
