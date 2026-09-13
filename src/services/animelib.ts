@@ -10,12 +10,15 @@ export interface AnimeLibBookmarkItem {
   current_progress_number?: number;
   last_item_number?: number;
   poster?: string;
+  folderStatus?: 'watching' | 'planned';
 }
 
 export interface AnimeLibEpisodeInfo {
   latestEpisode: number;
   voiceovers: string[];
   latestVoiceovers: string[];
+  maxQuality?: string;
+  availablePlayers?: string[];
 }
 
 export interface DirectVideoLinkResult {
@@ -56,93 +59,144 @@ export function normalizeVideoUrl(url: string): string {
   return trimmed;
 }
 
+export const QUALITY_KEYS = [
+  '2160', '1440', '1080', '720', '480', '360',
+  '2160p', '1440p', '1080p', '720p', '480p', '360p'
+];
+
 /**
- * Извлечение валидного URL и качества из вложенных структур плеера
- * (проверяет qualities, video, src, url, file, stream, host и вложенные объекты)
+ * Извлечение валидного URL и качества из вложенных структур плеера AnimeLib.
+ * Глубокий рекурсивный парсинг без какого-либо приведения объекта к строке.
+ * Поддерживает форматы:
+ * - { video: { "1080": "https://...", "720": "https://..." } }
+ * - { qualities: [ { href/url: "https://...", resolution: 1080 } ] }
+ * - { host: "...", src: { "1080": "/path.m3u8" } } или { video: { host: "...", src: "..." } }
+ * Относительные пути объединяются с хостом.
  */
 export function extractDirectStreamUrl(
   pl: any,
   defaultHost?: string
 ): { url: string; quality?: string } | null {
-  if (!pl) return null;
+  if (!pl || typeof pl !== 'object') return null;
 
-  const host = pl.host || defaultHost;
+  // Извлекаем host, если он указан на любом уровне
+  let host = pl.host || defaultHost;
+  if (pl.video && typeof pl.video === 'object' && pl.video.host) {
+    host = pl.video.host;
+  }
+  if (pl.src && typeof pl.src === 'object' && pl.src.host) {
+    host = pl.src.host;
+  }
 
-  const tryUrl = (val: any, qualityHint?: string): { url: string; quality?: string } | null => {
+  const tryResolve = (val: any, qualityHint?: string, currentHost?: string): { url: string; quality?: string } | null => {
     if (!val) return null;
+
+    // 1. Строка (СТРОГИЙ парсинг, без неявного String(obj))
     if (typeof val === 'string') {
       const trimmed = val.trim();
+      if (!trimmed || /^\d+$/.test(trimmed)) return null;
+
+      // Прямой сетевой URL
       if (isValidVideoUrl(trimmed)) {
         return { url: normalizeVideoUrl(trimmed), quality: qualityHint };
       }
-      // Если строка - относительный путь манифеста и известен хост
-      if (host && (trimmed.startsWith('/') || trimmed.includes('.m3u8') || trimmed.includes('.mp4'))) {
-        const cleanHost = String(host).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+
+      // Относительный путь манифеста с хостом
+      const h = currentHost || host;
+      if (h && (trimmed.startsWith('/') || trimmed.includes('.m3u8') || trimmed.includes('.mp4'))) {
+        const cleanHost = String(h).replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const cleanPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
         const combined = `https://${cleanHost}${cleanPath}`;
         if (isValidVideoUrl(combined)) {
           return { url: combined, quality: qualityHint };
         }
       }
+      return null;
     }
+
+    // 2. Объект (глубокий перебор ключей в строгом порядке качества)
+    if (typeof val === 'object' && !Array.isArray(val)) {
+      const objHost = val.host || currentHost || host;
+
+      // 2a. Проверяем ключи качества в порядке убывания (2160p -> 1440p -> 1080p -> 720p...)
+      for (const qKey of QUALITY_KEYS) {
+        if (val[qKey] !== undefined) {
+          const res = tryResolve(val[qKey], qKey.includes('p') ? qKey : `${qKey}p`, objHost);
+          if (res) return res;
+        }
+      }
+
+      // 2b. Проверяем вложенные свойства плеера
+      if (val.qualities) {
+        const res = tryResolve(val.qualities, qualityHint, objHost);
+        if (res) return res;
+      }
+      if (val.video && val.video !== val) {
+        const res = tryResolve(val.video, qualityHint, objHost);
+        if (res) return res;
+      }
+      if (val.src && val.src !== val) {
+        const res = tryResolve(val.src, qualityHint, objHost);
+        if (res) return res;
+      }
+
+      for (const field of ['href', 'url', 'file', 'stream', 'link', 'hls', 'manifest']) {
+        if (val[field] !== undefined) {
+          const res = tryResolve(val[field], qualityHint, objHost);
+          if (res) return res;
+        }
+      }
+
+      return null;
+    }
+
+    // 3. Массив (например qualities: [ { href: "...", resolution: 1080 } ])
+    if (Array.isArray(val)) {
+      // Сортируем по разрешению от большего к меньшему
+      const sorted = [...val].sort((a, b) => {
+        const resA = Number(a?.resolution || a?.quality || parseInt(a?.name || '0', 10) || 0);
+        const resB = Number(b?.resolution || b?.quality || parseInt(b?.name || '0', 10) || 0);
+        return resB - resA;
+      });
+
+      for (const item of sorted) {
+        if (!item) continue;
+        if (typeof item === 'string') {
+          const res = tryResolve(item, qualityHint, currentHost);
+          if (res) return res;
+        } else if (typeof item === 'object') {
+          const itemHost = item.host || currentHost || host;
+          const q = item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : qualityHint);
+          const candidate = item.href || item.url || item.src || item.file || item.link || item.stream || item.path;
+          const res = tryResolve(candidate, q, itemHost);
+          if (res) return res;
+        }
+      }
+      return null;
+    }
+
     return null;
   };
 
-  // 1. Проверяем pl.qualities
+  // Поочередно проверяем основные свойства плеера
   if (pl.qualities) {
-    if (Array.isArray(pl.qualities)) {
-      const sorted = [...pl.qualities].sort((a, b) => (b.resolution || b.quality || 0) - (a.resolution || a.quality || 0));
-      for (const qItem of sorted) {
-        const urlCandidate = qItem.url || qItem.src || qItem.file || qItem.link || qItem.stream;
-        const qLabel = qItem.resolution ? `${qItem.resolution}p` : (qItem.quality ? `${qItem.quality}` : undefined);
-        const res = tryUrl(urlCandidate, qLabel);
-        if (res) return res;
-      }
-    } else if (typeof pl.qualities === 'object') {
-      const qKeys = ['1080', '720', '480', '360', '1080p', '720p', '480p', '360p'];
-      for (const k of qKeys) {
-        if (pl.qualities[k]) {
-          const res = tryUrl(pl.qualities[k], k.includes('p') ? k : `${k}p`);
-          if (res) return res;
-        }
-      }
-      for (const [k, v] of Object.entries(pl.qualities)) {
-        const res = tryUrl(v, k);
-        if (res) return res;
-      }
-    }
+    const res = tryResolve(pl.qualities, undefined, host);
+    if (res) return res;
   }
 
-  // 2. Проверяем pl.video
   if (pl.video) {
-    if (typeof pl.video === 'string') {
-      const res = tryUrl(pl.video);
-      if (res) return res;
-    } else if (typeof pl.video === 'object') {
-      const qKeys = ['1080', '720', '480', '360', '1080p', '720p', '480p', '360p'];
-      for (const k of qKeys) {
-        if (pl.video[k]) {
-          const res = tryUrl(pl.video[k], k.includes('p') ? k : `${k}p`);
-          if (res) return res;
-        }
-      }
-      for (const key of ['src', 'url', 'file', 'link', 'hls', 'manifest']) {
-        if (pl.video[key]) {
-          const res = tryUrl(pl.video[key]);
-          if (res) return res;
-        }
-      }
-      for (const subVal of Object.values(pl.video)) {
-        const res = tryUrl(subVal);
-        if (res) return res;
-      }
-    }
+    const res = tryResolve(pl.video, undefined, host);
+    if (res) return res;
   }
 
-  // 3. Проверяем прямые свойства
-  for (const prop of ['src', 'url', 'file', 'stream', 'link', 'hls']) {
-    if (pl[prop]) {
-      const res = tryUrl(pl[prop]);
+  if (pl.src) {
+    const res = tryResolve(pl.src, undefined, host);
+    if (res) return res;
+  }
+
+  for (const field of ['href', 'url', 'file', 'stream', 'link', 'hls']) {
+    if (pl[field]) {
+      const res = tryResolve(pl[field], undefined, host);
       if (res) return res;
     }
   }
@@ -167,8 +221,24 @@ export function decodeKodikSrc(encoded: string): string {
 }
 
 export function isNativeStreamPlayer(pl: any): boolean {
-  if (!pl) return false;
-  // Если у плеера есть валидный прямой URL потока (не Kodik)
+  if (!pl || typeof pl !== 'object') return false;
+  const pName = (pl.player || '').toLowerCase();
+
+  // Исключаем Kodik
+  if (pName.includes('kodik') || (typeof pl.src === 'string' && pl.src.includes('kodik'))) {
+    return false;
+  }
+
+  // Явные нативные плееры AnimeLib
+  if (pName.includes('libplayer') || pName.includes('cloudcdn') || pName.includes('animelib')) {
+    return true;
+  }
+
+  // Если у плеера есть видеообъект или качества от AnimeLib
+  if (pl.video && typeof pl.video === 'object') {
+    return true;
+  }
+
   const extracted = extractDirectStreamUrl(pl);
   if (extracted && isValidVideoUrl(extracted.url)) {
     const u = extracted.url.toLowerCase();
@@ -176,10 +246,7 @@ export function isNativeStreamPlayer(pl: any): boolean {
       return true;
     }
   }
-  const pName = (pl.player || '').toLowerCase();
-  if (pName.includes('libplayer') || pName.includes('cloudcdn') || pName.includes('animelib')) {
-    return true;
-  }
+
   return false;
 }
 
@@ -259,7 +326,7 @@ export class AnimeLibService {
       .trim();
   }
 
-  async getAllWatching(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
+  async getAllTrackedBookmarks(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
     if (!forceRefresh && this.watchingCache && Date.now() - this.watchingCache.timestamp < this.CACHE_TTL_MS) {
       return this.watchingCache.items;
     }
@@ -280,121 +347,137 @@ export class AnimeLibService {
       'Site-Id': '5',
     };
 
-    const transformItems = (rawItems: any[]): AnimeLibBookmarkItem[] => {
-      const result: AnimeLibBookmarkItem[] = [];
-      const toSync: Array<any> = [];
+    const fetchBookmarksForStatus = async (statusId: number, folder: 'watching' | 'planned'): Promise<AnimeLibBookmarkItem[]> => {
+      const transformItems = (rawItems: any[]): AnimeLibBookmarkItem[] => {
+        const result: AnimeLibBookmarkItem[] = [];
+        const toSync: Array<any> = [];
 
-      for (const item of rawItems) {
-        const media = item.media || item.anime || item;
-        const mediaId = media.id || item.media_id || item.anime_id;
-        if (!mediaId) {
-          console.warn('[AnimeLib] Skipping bookmark without media ID');
-          continue;
+        for (const item of rawItems) {
+          const media = item.media || item.anime || item;
+          const mediaId = media.id || item.media_id || item.anime_id;
+          if (!mediaId) continue;
+
+          const rawProgress =
+            item.meta?.item_number ??
+            item.item?.number ??
+            item.item_number ??
+            item.current_item_number;
+
+          const rawLastEp =
+            media.metadata?.last_item?.number ??
+            media.metadata?.last_item?.item_number ??
+            media.items_count?.uploaded ??
+            media.last_item_number;
+
+          const entry: AnimeLibBookmarkItem = {
+            media_id: mediaId,
+            slug_url: media.slug_url || media.slug || String(mediaId),
+            name: media.name || media.eng_name || media.title || '',
+            rus_name: media.rus_name || media.russian || '',
+            current_progress_number: parseEpisodeNumber(rawProgress),
+            last_item_number: parseEpisodeNumber(rawLastEp),
+            poster: media.cover?.default || media.poster,
+            folderStatus: folder,
+          };
+
+          toSync.push({
+            media_id: entry.media_id,
+            title: entry.name,
+            rus_title: entry.rus_name,
+            status: folder,
+            last_tracked_episode: entry.current_progress_number || 0,
+            latest_episode: entry.last_item_number || 0,
+          });
+
+          result.push(entry);
         }
 
-        const rawProgress =
-          item.meta?.item_number ??
-          item.item?.number ??
-          item.item_number ??
-          item.current_item_number;
-
-        const rawLastEp =
-          media.metadata?.last_item?.number ??
-          media.metadata?.last_item?.item_number ??
-          media.items_count?.uploaded ??
-          media.last_item_number;
-
-        const entry: AnimeLibBookmarkItem = {
-          media_id: mediaId,
-          slug_url: media.slug_url || media.slug || String(mediaId),
-          name: media.name || media.eng_name || media.title || '',
-          rus_name: media.rus_name || media.russian || '',
-          current_progress_number: parseEpisodeNumber(rawProgress),
-          last_item_number: parseEpisodeNumber(rawLastEp),
-          poster: media.cover?.default || media.poster,
-        };
-
-        toSync.push({
-          media_id: entry.media_id,
-          title: entry.name,
-          rus_title: entry.rus_name,
-          status: 'watching',
-          last_tracked_episode: entry.current_progress_number || 0,
-          latest_episode: entry.last_item_number || 0,
-        });
-
-        result.push(entry);
-      }
-
-      try {
-        dbService.batchUpsertSyncItems(toSync);
-      } catch (dbError: any) {
-        console.warn('[AnimeLib] Could not batch sync bookmarks to local DB:', dbError?.message);
-      }
-
-      this.watchingCache = { items: result, timestamp: Date.now() };
-      return result;
-    };
-
-    const getLocalDbFallback = (): AnimeLibBookmarkItem[] => {
-      try {
-        const cached = dbService.getAllSyncItems('watching');
-        if (cached && cached.length > 0) {
-          console.log(`[AnimeLib] Using ${cached.length} cached watching titles from local SQLite.`);
-          return cached.map((c) => ({
-            media_id: c.media_id,
-            slug_url: String(c.media_id),
-            name: c.title,
-            rus_name: c.rus_title || undefined,
-            current_progress_number: c.last_tracked_episode,
-            last_item_number: c.last_tracked_episode,
-          }));
+        try {
+          dbService.batchUpsertSyncItems(toSync);
+        } catch (dbError: any) {
+          console.warn(`[AnimeLib] Could not batch sync ${folder} bookmarks to local DB:`, dbError?.message);
         }
-      } catch {}
-      return [];
-    };
 
-    try {
-      const response = await this.client.get('/bookmarks', {
-        params: {
-          user_id: userId,
-          status: 21,
-          page: 1,
-          limit: 60,
-          sort_by: 'created_at',
-          sort_type: 'desc',
-        },
-        headers: requestHeaders,
-      });
-
-      console.log(`[AnimeLib] Successfully fetched ${response.data?.data?.length ?? 0} bookmarks via hapi.hentaicdn.org`);
-      const items = response.data?.data || response.data || [];
-      return transformItems(items);
-    } catch (error: any) {
-      console.warn(
-        '[AnimeLib] Primary /bookmarks failed, trying /users/{id}/bookmarks:',
-        error?.response?.status || error?.message
-      );
+        return result;
+      };
 
       try {
-        const fallbackRes = await this.client.get(`/users/${userId}/bookmarks`, {
+        const response = await this.client.get('/bookmarks', {
           params: {
-            status: 21,
+            user_id: userId,
+            status: statusId,
             page: 1,
-            limit: 60,
+            limit: 80,
             sort_by: 'created_at',
             sort_type: 'desc',
           },
           headers: requestHeaders,
         });
-        const items = fallbackRes.data?.data || fallbackRes.data || [];
-        console.log('[AnimeLib] Successfully fetched bookmarks via fallback:', items.length);
+        const items = response.data?.data || response.data || [];
         return transformItems(items);
-      } catch (fallbackError: any) {
-        console.error('[AnimeLib] Both endpoints failed:', fallbackError?.response?.status, fallbackError?.message);
-        return getLocalDbFallback();
+      } catch {
+        try {
+          const fallbackRes = await this.client.get(`/users/${userId}/bookmarks`, {
+            params: {
+              status: statusId,
+              page: 1,
+              limit: 80,
+              sort_by: 'created_at',
+              sort_type: 'desc',
+            },
+            headers: requestHeaders,
+          });
+          const items = fallbackRes.data?.data || fallbackRes.data || [];
+          return transformItems(items);
+        } catch {
+          return [];
+        }
+      }
+    };
+
+    // Загружаем параллельно статус 21 (Смотрю) и статус 22 (Запланировано)
+    const [watchingItems, plannedItems] = await Promise.all([
+      fetchBookmarksForStatus(21, 'watching'),
+      fetchBookmarksForStatus(22, 'planned'),
+    ]);
+
+    const combined = [...watchingItems];
+    const seenMediaIds = new Set(combined.map((i) => i.media_id));
+
+    for (const p of plannedItems) {
+      if (!seenMediaIds.has(p.media_id)) {
+        seenMediaIds.add(p.media_id);
+        combined.push(p);
       }
     }
+
+    if (combined.length === 0) {
+      // Fallback на локальную базу данных
+      try {
+        const cachedWatching = dbService.getAllSyncItems('watching') || [];
+        const cachedPlanned = dbService.getAllSyncItems('planned') || [];
+        const allCached = [...cachedWatching, ...cachedPlanned];
+        if (allCached.length > 0) {
+          return allCached.map((c) => ({
+            media_id: c.media_id,
+            slug_url: String(c.media_id),
+            name: c.title,
+            rus_name: c.rus_title || undefined,
+            current_progress_number: c.last_tracked_episode,
+            last_item_number: c.latest_episode || c.last_tracked_episode,
+            folderStatus: c.status === 'planned' ? 'planned' : 'watching',
+          }));
+        }
+      } catch {}
+    }
+
+    this.watchingCache = { items: combined, timestamp: Date.now() };
+    return combined;
+  }
+
+  async getAllWatching(forceRefresh: boolean = false): Promise<AnimeLibBookmarkItem[]> {
+    const all = await this.getAllTrackedBookmarks(forceRefresh);
+    return all.filter((item) => item.folderStatus !== 'planned');
   }
 
   async getMediaEpisodes(mediaId: number, slugUrl?: string): Promise<AnimeLibEpisodeInfo> {
@@ -412,6 +495,10 @@ export class AnimeLibService {
       let maxEp = 0;
       const studiosSet = new Set<string>();
       const latestStudiosSet = new Set<string>();
+      const latestPlayersSet = new Set<string>();
+      let has4K = false;
+      let has1080 = false;
+      let has720 = false;
 
       for (const ep of episodesData) {
         const num = parseEpisodeNumber(ep.number ?? ep.item_number);
@@ -432,14 +519,43 @@ export class AnimeLibService {
                 latestStudiosSet.add(teamName);
               }
             }
+
+            if (num === maxEp) {
+              const pName = pl.player || (isNativeStreamPlayer(pl) ? 'AnimeLib' : 'Kodik');
+              const teamLabel = teamName ? ` (${teamName})` : '';
+              latestPlayersSet.add(`${pName}${teamLabel}`);
+
+              const plStr = JSON.stringify(pl).toLowerCase();
+              if (plStr.includes('2160') || plStr.includes('4k')) {
+                has4K = true;
+              } else if (plStr.includes('1080')) {
+                has1080 = true;
+              } else if (plStr.includes('720')) {
+                has720 = true;
+              }
+              if (isNativeStreamPlayer(pl)) {
+                has1080 = true;
+              }
+            }
           }
         }
+      }
+
+      let maxQuality = '1080p FHD';
+      if (has4K) {
+        maxQuality = '🔥 1080p / 4K Ultra HD';
+      } else if (has1080) {
+        maxQuality = '🔥 1080p Full HD';
+      } else if (has720) {
+        maxQuality = '720p HD';
       }
 
       return {
         latestEpisode: maxEp,
         voiceovers: Array.from(studiosSet),
         latestVoiceovers: Array.from(latestStudiosSet),
+        maxQuality,
+        availablePlayers: Array.from(latestPlayersSet),
       };
     } catch {
       // Fallback: Web Scraping через cheerio
@@ -459,9 +575,17 @@ export class AnimeLibService {
           latestEpisode: 0,
           voiceovers: list,
           latestVoiceovers: list,
+          maxQuality: '1080p FHD',
+          availablePlayers: ['AnimeLib (HLS)'],
         };
       } catch (scrapeErr: any) {
-        return { latestEpisode: 0, voiceovers: [], latestVoiceovers: [] };
+        return {
+          latestEpisode: 0,
+          voiceovers: [],
+          latestVoiceovers: [],
+          maxQuality: '1080p FHD',
+          availablePlayers: ['AnimeLib (HLS)'],
+        };
       }
     }
   }
@@ -886,38 +1010,44 @@ export class AnimeLibService {
         return null;
       }
 
-      // 4. Приоритезация и отбор подходящих плееров
-      const sortedPlayers = [...players].sort((a, b) => {
-        // Если указана озвучка, проверяем соответствие
-        if (targetVoiceover && targetVoiceover.trim()) {
-          const normTarget = targetVoiceover.trim().toLowerCase();
-          const aTeam = (a.team?.name || '').toLowerCase();
-          const bTeam = (b.team?.name || '').toLowerCase();
-          const aVoMatch = aTeam && (aTeam.includes(normTarget) || normTarget.includes(aTeam));
-          const bVoMatch = bTeam && (bTeam.includes(normTarget) || normTarget.includes(bTeam));
-          if (aVoMatch && !bVoMatch) return -1;
-          if (!aVoMatch && bVoMatch) return 1;
-        }
+      // 4. ЖЕСТКИЙ приоритет: нативный плеер AnimeLib (1080p/4K) ВСЕГДА проверяется первым!
+      // К Kodik обращаться ТОЛЬКО в случае, если AnimeLib вернул 404 или у него нет плееров.
+      const nativeAnimeLibPlayers = players.filter((p) => isNativeStreamPlayer(p));
+      const fallbackExternalPlayers = players.filter((p) => !isNativeStreamPlayer(p));
 
-        // Приоритет нативным стримам над внешними плеерами
-        const aNative = isNativeStreamPlayer(a);
-        const bNative = isNativeStreamPlayer(b);
-        if (aNative && !bNative) return -1;
-        if (!aNative && bNative) return 1;
+      const sortPlayerGroup = (group: any[]) => {
+        return [...group].sort((a, b) => {
+          if (targetVoiceover && targetVoiceover.trim()) {
+            const normTarget = targetVoiceover.trim().toLowerCase();
+            const aTeam = (a.team?.name || '').toLowerCase();
+            const bTeam = (b.team?.name || '').toLowerCase();
+            const aVoMatch = aTeam && (aTeam.includes(normTarget) || normTarget.includes(aTeam));
+            const bVoMatch = bTeam && (bTeam.includes(normTarget) || normTarget.includes(bTeam));
+            if (aVoMatch && !bVoMatch) return -1;
+            if (!aVoMatch && bVoMatch) return 1;
+          }
 
-        // Приоритет озвучке (translation_type.id === 2) над субтитрами
-        const aVoType = a.translation_type?.id === 2;
-        const bVoType = b.translation_type?.id === 2;
-        if (aVoType && !bVoType) return -1;
-        if (!aVoType && bVoType) return 1;
+          // Приоритет озвучке (type 2) над субтитрами (type 1)
+          const aVoType = a.translation_type?.id === 2;
+          const bVoType = b.translation_type?.id === 2;
+          if (aVoType && !bVoType) return -1;
+          if (!aVoType && bVoType) return 1;
 
-        return 0;
-      });
+          return 0;
+        });
+      };
 
-      // Перебираем кандидатов плееров, пока не найдем рабочий стрим с валидным URL
-      for (const player of sortedPlayers) {
+      const sortedNative = sortPlayerGroup(nativeAnimeLibPlayers);
+      const sortedFallback = sortPlayerGroup(fallbackExternalPlayers);
+
+      console.log(
+        `[AnimeLib] Эпизод ${targetEpNum}: Найдено нативных плееров: ${sortedNative.length}, внешних плееров (Kodik): ${sortedFallback.length}`
+      );
+
+      // Вспомогательная функция проверки и резолва отдельного плеера
+      const testAndResolvePlayer = async (player: any): Promise<DirectVideoLinkResult | null> => {
         let streamUrl = '';
-        let detectedQuality = '720p';
+        let detectedQuality = '1080p';
 
         // 1. Проверяем вложенные структуры плеера (video, src, host, qualities, etc.)
         const extracted = extractDirectStreamUrl(player);
@@ -926,7 +1056,7 @@ export class AnimeLibService {
           if (extracted.quality) detectedQuality = extracted.quality;
         }
 
-        // 2. Если валидного сетевого URL нет, проверяем, не передан ли числовой ID (например, 166752)
+        // 2. Если валидного сетевого URL нет, проверяем числовой ID
         if (!streamUrl) {
           const rawVideo = player.video;
           const rawSrc = player.src;
@@ -944,7 +1074,7 @@ export class AnimeLibService {
 
           if (numericIdCandidate) {
             console.log(
-              `[AnimeLib] Плеер ${player.player || 'AnimeLib'} содержит числовой ID (${numericIdCandidate}) вместо ссылки. Разрешаем через API...`
+              `[AnimeLib] Плеер #${player.id || 'N/A'} (${player.player || 'AnimeLib'}) содержит числовой ID (${numericIdCandidate}). Разрешаем через API...`
             );
             const resolvedApi = await this.resolveNumericVideoId(numericIdCandidate, player, matchingEp?.id);
             if (resolvedApi && isValidVideoUrl(resolvedApi.url)) {
@@ -955,18 +1085,23 @@ export class AnimeLibService {
         }
 
         // 3. Строгая валидация URL потока:
-        // Если streamUrl не начинается с http://, https:// или //, он НЕ считается валидным URL!
-        // Переходим к следующему плееру в sortedPlayers (fallback на Kodik или другие доступные плееры)
         if (!isValidVideoUrl(streamUrl)) {
+          const rawInfo =
+            streamUrl ||
+            (typeof player.video === 'object'
+              ? JSON.stringify(player.video)
+              : (typeof player.src === 'object'
+                ? JSON.stringify(player.src)
+                : (player.video || player.src || 'пусто')));
           console.warn(
-            `[AnimeLib] Плеер #${player.id || 'N/A'} (${player.player || 'Unknown'}, ${player.team?.name || 'Без студии'}) вернул невалидный URL («${streamUrl || player.video || player.src || 'пусто'}»). Переходим к следующему плееру...`
+            `[AnimeLib] Плеер #${player.id || 'N/A'} (${player.player || 'Unknown'}, ${player.team?.name || 'Без студии'}) не вернул прямой URL (данные: ${String(rawInfo).substring(0, 100)}).`
           );
-          continue;
+          return null;
         }
 
         const normalizedUrl = normalizeVideoUrl(streamUrl);
 
-        // 4. Проверяем, является ли ссылка Kodik фреймом или страницей плеера
+        // 4. Проверяем, является ли ссылка Kodik фреймом
         const isKodik =
           normalizedUrl.includes('kodikplayer.com') ||
           normalizedUrl.includes('kodik.info') ||
@@ -989,11 +1124,11 @@ export class AnimeLibService {
               },
             };
           }
-          console.warn(`[AnimeLib] Не удалось извлечь рабочий манифест из Kodik плеера #${player.id}, проверяем следующий...`);
-          continue;
+          console.warn(`[AnimeLib] Не удалось извлечь рабочий манифест из Kodik плеера #${player.id}.`);
+          return null;
         }
 
-        // 5. Нативный стрим AnimeLib (прямой .m3u8, .mp4 или потоковый HTTP URL)
+        // 5. Нативный стрим AnimeLib (прямой .m3u8, .mp4 или потоковый URL)
         let format: 'm3u8' | 'mp4' | 'stream' = 'stream';
         if (normalizedUrl.includes('.m3u8')) {
           format = 'm3u8';
@@ -1001,7 +1136,7 @@ export class AnimeLibService {
           format = 'mp4';
         }
 
-        const qualMatch = normalizedUrl.match(/\b(1080|720|480|360)p?\b/i);
+        const qualMatch = normalizedUrl.match(/\b(2160|1440|1080|720|480|360)p?\b/i);
         if (qualMatch) {
           detectedQuality = `${qualMatch[1]}p`;
         }
@@ -1018,6 +1153,44 @@ export class AnimeLibService {
             'User-Agent': DEFAULT_USER_AGENT,
           },
         };
+      };
+
+      // ПЕРВЫЙ ЭТАП: СТРОГО нативные плееры AnimeLib
+      for (const player of sortedNative) {
+        try {
+          const res = await testAndResolvePlayer(player);
+          if (res && isValidVideoUrl(res.url)) {
+            console.log(
+              `[AnimeLib] ✅ Успешно выбран нативный плеер AnimeLib #${player.id} (${res.quality}, ${res.voiceover || 'Без студии'})`
+            );
+            return res;
+          }
+        } catch (nativeErr: any) {
+          console.warn(`[AnimeLib] Ошибка при проверке нативного плеера #${player.id}:`, nativeErr?.message);
+        }
+      }
+
+      // ВТОРОЙ ЭТАП: ТОЛЬКО если AnimeLib не дал рабочего потока — переходим к Kodik
+      if (sortedNative.length > 0) {
+        console.warn(
+          `[AnimeLib] ⚠️ Нативные плееры AnimeLib (${sortedNative.length}) недоступны или вернули ошибку. Выполняем fallback на внешние плееры (Kodik)...`
+        );
+      } else {
+        console.log(`[AnimeLib] Нативных плееров AnimeLib не обнаружено. Используем внешние плееры (Kodik)...`);
+      }
+
+      for (const player of sortedFallback) {
+        try {
+          const res = await testAndResolvePlayer(player);
+          if (res && isValidVideoUrl(res.url)) {
+            console.log(
+              `[AnimeLib] ✅ Выбран резервный плеер #${player.id} (${res.playerType}, ${res.quality}, ${res.voiceover || 'Без студии'})`
+            );
+            return res;
+          }
+        } catch (fallbackErr: any) {
+          console.warn(`[AnimeLib] Ошибка при проверке внешнего плеера #${player.id}:`, fallbackErr?.message);
+        }
       }
 
       console.warn(`[AnimeLib] No valid video stream could be resolved for episode ${targetEpNum} (media ID ${id})`);

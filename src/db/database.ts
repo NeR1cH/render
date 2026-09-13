@@ -100,8 +100,18 @@ db.exec('CREATE TABLE IF NOT EXISTS download_queue (' +
   'status TEXT NOT NULL DEFAULT \'pending\', ' +
   'progress INTEGER NOT NULL DEFAULT 0, ' +
   'file_path TEXT, ' +
+  'telegram_chat_id TEXT, ' +
+  'telegram_message_id INTEGER, ' +
   'created_at INTEGER NOT NULL' +
 ');');
+
+try {
+  db.exec('ALTER TABLE download_queue ADD COLUMN telegram_chat_id TEXT');
+} catch {}
+
+try {
+  db.exec('ALTER TABLE download_queue ADD COLUMN telegram_message_id INTEGER');
+} catch {}
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_download_queue_status ON download_queue(status, created_at);');
 
@@ -113,6 +123,8 @@ export interface DownloadQueueRecord {
   status: 'pending' | 'downloading' | 'completed' | 'error';
   progress: number;
   file_path?: string | null;
+  telegram_chat_id?: string | null;
+  telegram_message_id?: number | null;
   created_at: number;
 }
 
@@ -417,12 +429,37 @@ export const dbService = {
     }
   },
 
-  addToDownloadQueue(mediaId: number, episode: number, voiceover?: string): number {
+  addToDownloadQueue(
+    mediaId: number,
+    episode: number,
+    voiceover?: string,
+    telegramChatId?: string | number,
+    telegramMessageId?: number
+  ): number {
     const stmt = db.prepare(
-      'INSERT INTO download_queue (media_id, episode, voiceover, status, progress, created_at) VALUES (?, ?, ?, \'pending\', 0, ?)'
+      'INSERT INTO download_queue (media_id, episode, voiceover, status, progress, created_at, telegram_chat_id, telegram_message_id) VALUES (?, ?, ?, \'pending\', 0, ?, ?, ?)'
     );
-    const result = stmt.run(mediaId, episode, voiceover || null, Date.now());
+    const result = stmt.run(
+      mediaId,
+      episode,
+      voiceover || null,
+      Date.now(),
+      telegramChatId ? String(telegramChatId) : null,
+      telegramMessageId || null
+    );
     return Number(result.lastInsertRowid);
+  },
+
+  updateDownloadTelegramMessage(id: number, messageId: number, chatId?: string | number): void {
+    if (chatId) {
+      db.prepare('UPDATE download_queue SET telegram_message_id = ?, telegram_chat_id = ? WHERE id = ?').run(
+        messageId,
+        String(chatId),
+        id
+      );
+    } else {
+      db.prepare('UPDATE download_queue SET telegram_message_id = ? WHERE id = ?').run(messageId, id);
+    }
   },
 
   updateDownloadStatus(

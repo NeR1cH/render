@@ -67,12 +67,22 @@ export function formatAnimeCard(data: {
   description?: string;
   quality?: string;
   cardStyle?: string;
+  maxQuality?: string;
+  availablePlayers?: string[];
+  folderStatus?: 'watching' | 'planned';
 }): string {
   const displayTitle = data.rusTitle || data.title;
   const originalTitle = data.rusTitle && data.title !== data.rusTitle ? ` <i>(${data.title})</i>` : '';
   const score = data.score ? `⭐ <b>${data.score.toFixed(1)}</b> / 10` : '⭐ <i>Без оценки</i>';
   const genres = data.genres && data.genres.length > 0 ? `🏷 <i>${data.genres.slice(0, 4).join(', ')}</i>` : '';
   const qualityBadge = data.quality ? ` <code>[${data.quality}]</code>` : '';
+
+  const folderBadge = data.folderStatus === 'planned' ? '📌 <b>Список:</b> <i>Запланировано</i>' : '';
+  const maxQualityText = data.maxQuality ? `💎 <b>Макс. качество:</b> ${escapeHtml(data.maxQuality)}` : '';
+  const playersText =
+    data.availablePlayers && data.availablePlayers.length > 0
+      ? `🎮 <b>Плееры:</b> ${data.availablePlayers.slice(0, 3).map((p) => `<code>${escapeHtml(p)}</code>`).join(', ')}`
+      : '';
 
   // Episode tracking status line
   let epText = '';
@@ -113,7 +123,9 @@ export function formatAnimeCard(data: {
   if (data.cardStyle === 'minimal') {
     return [
       `🎬 <b>${escapeHtml(displayTitle)}</b>`,
+      folderBadge,
       epText,
+      maxQualityText,
       voiceoverText,
       noteText,
     ].filter(Boolean).join('\n');
@@ -123,8 +135,11 @@ export function formatAnimeCard(data: {
   if (data.cardStyle === 'compact') {
     return [
       `🎬 <b>${escapeHtml(displayTitle)}</b>${originalTitle}`,
+      folderBadge,
       score,
       epText,
+      maxQualityText,
+      playersText,
       voiceoverText,
       noteText,
     ].filter(Boolean).join('\n');
@@ -140,9 +155,12 @@ export function formatAnimeCard(data: {
 
   const lines = [
     `🎬 <b>${escapeHtml(displayTitle)}</b>${originalTitle}`,
+    folderBadge,
     score,
     genres,
     epText,
+    maxQualityText,
+    playersText,
     voiceoverText,
     noteText,
     desc,
@@ -285,9 +303,9 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
       parse_mode: 'HTML',
     });
 
-    const watchingList = await animelibService.getAllWatching();
+    const trackedList = await animelibService.getAllTrackedBookmarks();
 
-    if (!watchingList || watchingList.length === 0) {
+    if (!trackedList || trackedList.length === 0) {
       dbService.saveCheckReport({
         timestamp: Date.now(),
         checked_count: 0,
@@ -295,12 +313,12 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         matched_count: 0,
         synced_count: 0,
         status: 'warning',
-        message: 'Список «Смотрю» пуст или требуется обновление cookie',
+        message: 'Списки «Смотрю» и «Запланировано» пусты или требуется обновление cookie',
       });
 
       if (notifyIfEmpty) {
         await send(
-          '📭 В списке <b>«Смотрю»</b> пока нет тайтлов, либо нужно обновить куку в <code>ANIMELIB_COOKIE</code>.',
+          '📭 В списках <b>«Смотрю»</b> и <b>«Запланировано»</b> пока нет тайтлов, либо нужно обновить куку в <code>ANIMELIB_COOKIE</code>.',
           { parse_mode: 'HTML' }
         );
       }
@@ -309,13 +327,13 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
         checkedCount: 0,
         updatesCount: 0,
         updatedTitles: [],
-        message: 'В списке «Смотрю» пока нет тайтлов или требуется обновление cookie',
+        message: 'В отслеживаемых списках пока нет тайтлов или требуется обновление cookie',
       };
     }
 
     let updatesCount = 0;
 
-    for (const item of watchingList) {
+    for (const item of trackedList) {
       try {
         const mediaEpisodes = await animelibService.getMediaEpisodes(item.media_id, item.slug_url);
         const stored = dbService.getSyncItemByMediaId(item.media_id);
@@ -407,6 +425,9 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
             description: shikiAnime?.description,
             quality: prefs.preferred_quality || '1080p',
             cardStyle: prefs.card_style || 'full',
+            maxQuality: mediaEpisodes.maxQuality,
+            availablePlayers: mediaEpisodes.availablePlayers,
+            folderStatus: item.folderStatus,
           });
 
           const kb = buildAnimeCardKeyboard({
@@ -472,7 +493,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
     if (updatesCount === 0 && notifyIfEmpty) {
       await send(
-        `✨ <b>Все серии просмотрены!</b>\nПроверено <b>${watchingList.length}</b> тайтлов из списка «Смотрю», свежих серий пока нет.`,
+        `✨ <b>Все серии просмотрены!</b>\nПроверено <b>${trackedList.length}</b> тайтлов из списков «Смотрю» и «Запланировано», свежих серий пока нет.`,
         {
           parse_mode: 'HTML',
           reply_markup: new InlineKeyboard().text('🔄 Проверить снова', 'check_updates'),
@@ -480,11 +501,11 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
       );
     }
 
-    const matchedCount = watchingList.filter((item) => {
+    const matchedCount = trackedList.filter((item) => {
       const s = dbService.getSyncItemByMediaId(item.media_id);
       return !!s?.shiki_id;
     }).length;
-    const syncedCount = watchingList.filter((item) => {
+    const syncedCount = trackedList.filter((item) => {
       const s = dbService.getSyncItemByMediaId(item.media_id);
       return s?.shiki_synced === 1;
     }).length;
@@ -493,7 +514,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
     dbService.saveCheckReport({
       timestamp: Date.now(),
-      checked_count: watchingList.length,
+      checked_count: trackedList.length,
       updates_count: updatesCount,
       matched_count: matchedCount,
       synced_count: syncedCount,
@@ -504,7 +525,7 @@ export async function checkAnimeUpdates(ctx?: Context, notifyIfEmpty: boolean = 
 
     return {
       success: true,
-      checkedCount: watchingList.length,
+      checkedCount: trackedList.length,
       updatesCount,
       updatedTitles,
       message: updatesCount > 0 ? `Найдено новых серий: ${updatesCount}` : 'Свежих релизов пока нет',
@@ -1400,11 +1421,6 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
 
   await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} поставлена в очередь!` });
 
-  downloaderService.addToQueue(mediaId, ep, voiceover);
-  downloaderService.processQueue().catch((err) => {
-    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
-  });
-
   const stored = dbService.getSyncItemByMediaId(mediaId);
   const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
 
@@ -1415,7 +1431,7 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
     `🎬 <b>Серия:</b> <code>#${ep}</code>`,
     `🎙 <b>Озвучка:</b> <code>${escapeHtml(voiceover)}</code>`,
     '',
-    '⚡️ <i>Загрузчик начал фоновую обработку видеопотока через FFmpeg.</i>',
+    '⏳ <i>Инициализация видеопотока и запуск FFmpeg...</i>',
   ].join('\n');
 
   const kb = new InlineKeyboard()
@@ -1424,11 +1440,20 @@ bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
     .text('📋 Выбрать другой тайтл', 'dl_back_titles')
     .text('📺 Мой список', 'list_watching');
 
+  let sentMsg: any = null;
   try {
-    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+    sentMsg = await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
   } catch {
-    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+    sentMsg = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
   }
+
+  const chatId = ctx.chat?.id ? String(ctx.chat.id) : undefined;
+  const messageId = sentMsg && typeof sentMsg === 'object' && 'message_id' in sentMsg ? sentMsg.message_id : undefined;
+
+  downloaderService.addToQueue(mediaId, ep, voiceover, chatId, messageId);
+  downloaderService.processQueue().catch((err) => {
+    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
+  });
 });
 
 // Callback: Back to Titles

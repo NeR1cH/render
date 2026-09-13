@@ -18,6 +18,41 @@ try {
   }
 }
 
+function escapeHtml(text: string): string {
+  return (text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderProgressBar(percent: number, length: number = 10): string {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clamped / 100) * length);
+  const empty = length - filled;
+  return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+let cachedBot: any = null;
+async function sendTelegramUpdate(chatId?: string, messageId?: number, text?: string) {
+  if (!chatId || !messageId || !text) return;
+  try {
+    if (!cachedBot) {
+      const mod = await import('../bot/index');
+      cachedBot = mod.bot;
+    }
+    if (cachedBot && cachedBot.api) {
+      await cachedBot.api.editMessageText(chatId, messageId, text, {
+        parse_mode: 'HTML',
+      });
+    }
+  } catch (err: any) {
+    if (!err?.message?.includes('message is not modified')) {
+      console.warn(`[Downloader] Не удалось обновить сообщение Telegram:`, err?.message);
+    }
+  }
+}
+
 export class DownloaderService {
   private isProcessing: boolean = false;
   private readonly downloadsDir = path.resolve(process.cwd(), 'downloads');
@@ -42,8 +77,14 @@ export class DownloaderService {
   /**
    * Добавить задачу на скачивание серии в очередь SQLite
    */
-  addToQueue(mediaId: number, episode: number, voiceover?: string): number {
-    return dbService.addToDownloadQueue(mediaId, episode, voiceover);
+  addToQueue(
+    mediaId: number,
+    episode: number,
+    voiceover?: string,
+    telegramChatId?: string,
+    telegramMessageId?: number
+  ): number {
+    return dbService.addToDownloadQueue(mediaId, episode, voiceover, telegramChatId, telegramMessageId);
   }
 
   /**
@@ -69,6 +110,9 @@ export class DownloaderService {
     streamHeaders?: Record<string, string>
   ): Promise<string> {
     this.ensureDownloadsDir();
+
+    const stored = dbService.getSyncItemByMediaId(task.media_id);
+    const animeTitle = stored?.rus_title || stored?.title || `Тайтл #${task.media_id}`;
 
     const safeVoiceover = (task.voiceover || 'default')
       .replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, '_')
@@ -103,11 +147,27 @@ export class DownloaderService {
 
     return new Promise((resolve, reject) => {
       let lastUpdatedProgress = 0;
+      let lastReportedStep = 0;
       let lastUpdateTime = 0;
 
       console.log(`[Downloader] Начинаю загрузку задачи #${task.id}...`);
       console.log(`[Downloader] URL потока: ${videoUrl}`);
       console.log(`[Downloader] Целевой файл: ${relativeFilePath}`);
+
+      // Стартовое оповещение в Telegram (0%)
+      if (task.telegram_chat_id && task.telegram_message_id) {
+        const initialText = [
+          '📥 <b>Скачивание серии началось...</b>',
+          '━━━━━━━━━━━━━━━━━━━━',
+          `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+          `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+          `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+          '',
+          `<b>[${renderProgressBar(0)}] 0%</b>`,
+          '⏳ <i>Инициализация потока и буферизация FFmpeg...</i>',
+        ].join('\n');
+        sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, initialText).catch(() => {});
+      }
 
       const command = ffmpeg(videoUrl)
         .inputOptions([
@@ -126,12 +186,22 @@ export class DownloaderService {
 
       command.on('progress', (progress) => {
         const now = Date.now();
-        // В HLS-потоках progress.percent может быть не определен, если нет точной длительности
         let percent = Math.floor(progress.percent || 0);
+
+        // Если HLS не отдает общую длительность, рассчитываем прогресс по таймкоду (из расчета серии ~24 мин = 1440 сек)
+        if (percent <= 0 && progress.timemark) {
+          try {
+            const parts = progress.timemark.split(':');
+            if (parts.length === 3) {
+              const sec = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+              percent = Math.min(98, Math.floor((sec / 1440) * 100));
+            }
+          } catch {}
+        }
 
         if (percent > 99) percent = 99;
 
-        // Обновляем статус при шаге от 5% или раз в 2.5 секунды
+        // Обновляем статус в базе при шаге от 5% или раз в 2.5 секунды
         if (
           (percent >= lastUpdatedProgress + 5 || now - lastUpdateTime > 2500) &&
           percent > lastUpdatedProgress
@@ -143,11 +213,65 @@ export class DownloaderService {
             `[Downloader] Задача #${task.id} прогресс: ${percent}% (время: ${progress.timemark || 'N/A'}, fps: ${progress.currentFps || 0})`
           );
         }
+
+        // Интерактивное обновление шкалы в Telegram каждые 20% (20, 40, 60, 80)
+        const currentStep = Math.floor(percent / 20) * 20;
+        if (currentStep > lastReportedStep && currentStep <= 80 && currentStep > 0) {
+          lastReportedStep = currentStep;
+          if (task.telegram_chat_id && task.telegram_message_id) {
+            const bar = renderProgressBar(currentStep);
+            let speedStr = '1.0x';
+            if (progress.currentFps && progress.currentFps > 0) {
+              speedStr = `${(progress.currentFps / 24).toFixed(1)}x`;
+            } else if (progress.currentKbps) {
+              speedStr = `${Math.round(progress.currentKbps)} кбит/с`;
+            }
+
+            const timemark = progress.timemark ? progress.timemark.split('.')[0] : '00:00';
+            const progressText = [
+              '📥 <b>Скачивание серии...</b>',
+              '━━━━━━━━━━━━━━━━━━━━',
+              `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+              `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+              `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+              '',
+              `<b>[${bar}] ${currentStep}%</b>`,
+              `⏱ <b>Таймкод:</b> <code>${timemark}</code> | 🚀 <b>Скорость:</b> <code>${speedStr}</code>`,
+            ].join('\n');
+
+            sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, progressText).catch(() => {});
+          }
+        }
       });
 
       command.on('end', () => {
         console.log(`[Downloader] ✅ Загрузка задачи #${task.id} успешно завершена: ${relativeFilePath}`);
         dbService.updateDownloadStatus(task.id, 'completed', 100, relativeFilePath);
+
+        // Расчет итогового размера файла
+        let fileSizeStr = 'N/A';
+        try {
+          const stats = fs.statSync(absoluteFilePath);
+          fileSizeStr = `${(stats.size / (1024 * 1024)).toFixed(1)} МБ`;
+        } catch {}
+
+        // Финальное сообщение в Telegram с метаданными
+        if (task.telegram_chat_id && task.telegram_message_id) {
+          const successText = [
+            '✅ <b>Серия успешно скачана!</b>',
+            '━━━━━━━━━━━━━━━━━━━━',
+            `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+            `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+            `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+            `📁 <b>Файл:</b> <code>${filename}</code>`,
+            `📦 <b>Размер:</b> <code>${fileSizeStr}</code>`,
+            '',
+            '🎉 <i>Файл сохранен в локальное хранилище и готов к просмотру!</i>',
+          ].join('\n');
+
+          sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, successText).catch(() => {});
+        }
+
         resolve(relativeFilePath);
       });
 
@@ -158,6 +282,18 @@ export class DownloaderService {
           console.error(`[Downloader] FFmpeg stderr:\n`, stderr.substring(0, 400));
         }
         dbService.updateDownloadStatus(task.id, 'error', 0);
+
+        if (task.telegram_chat_id && task.telegram_message_id) {
+          const errorText = [
+            '❌ <b>Ошибка при скачивании серии!</b>',
+            '━━━━━━━━━━━━━━━━━━━━',
+            `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
+            `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+            `⚠️ <i>${escapeHtml(errMsg)}</i>`,
+          ].join('\n');
+          sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, errorText).catch(() => {});
+        }
+
         reject(new Error(`FFmpeg error: ${errMsg}`));
       });
 
@@ -206,6 +342,16 @@ export class DownloaderService {
               `[Downloader] ❌ Не удалось разрешить валидный URL видеопотока для задачи #${task.id} (Media ${task.media_id}, Ep ${task.episode}, URL: ${videoLink?.url || 'пусто'})`
             );
             dbService.updateDownloadStatus(task.id, 'error', 0);
+
+            if (task.telegram_chat_id && task.telegram_message_id) {
+              const errResolveText = [
+                '❌ <b>Не удалось получить ссылку на видеопоток!</b>',
+                '━━━━━━━━━━━━━━━━━━━━',
+                `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
+                '⚠️ <i>Плееры AnimeLib и Kodik не предоставили рабочий HLS/MP4 поток.</i>',
+              ].join('\n');
+              sendTelegramUpdate(task.telegram_chat_id, task.telegram_message_id, errResolveText).catch(() => {});
+            }
             continue;
           }
 
@@ -229,3 +375,4 @@ export class DownloaderService {
 }
 
 export const downloaderService = new DownloaderService();
+
