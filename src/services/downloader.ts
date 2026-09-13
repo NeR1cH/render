@@ -5,9 +5,17 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { dbService, DownloadQueueRecord } from '../db/database';
 import { animelibService, ANIMELIB_WEB_URL } from './animelib';
 
-// Настройка пути к бинарнику FFmpeg
-if (ffmpegInstaller && ffmpegInstaller.path) {
-  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+// Настройка пути к бинарнику FFmpeg (системный бинарник имеет приоритет над @ffmpeg-installer)
+try {
+  if (fs.existsSync('/usr/bin/ffmpeg')) {
+    ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+  } else if (ffmpegInstaller && ffmpegInstaller.path) {
+    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  }
+} catch {
+  if (ffmpegInstaller && ffmpegInstaller.path) {
+    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  }
 }
 
 export class DownloaderService {
@@ -57,7 +65,8 @@ export class DownloaderService {
    */
   private async downloadTaskWithFFmpeg(
     task: DownloadQueueRecord,
-    videoUrl: string
+    videoUrl: string,
+    streamHeaders?: Record<string, string>
   ): Promise<string> {
     this.ensureDownloadsDir();
 
@@ -69,11 +78,28 @@ export class DownloaderService {
     const relativeFilePath = path.join('downloads', filename);
     const absoluteFilePath = path.join(this.downloadsDir, filename);
 
-    // Подготовка заголовков для обхода 403 Forbidden от CDN AnimeLib
+    // Подготовка заголовков для обхода 403 Forbidden от CDN (AnimeLib, Kodik и др.)
     const userAgent =
+      streamHeaders?.['User-Agent'] ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
-    const referer = `${ANIMELIB_WEB_URL}/`;
-    const headersOption = `Referer: ${referer}\r\nUser-Agent: ${userAgent}\r\n`;
+
+    const referer =
+      streamHeaders?.['Referer'] ||
+      (videoUrl.includes('kodik') || videoUrl.includes('solodcdn')
+        ? 'https://kodikplayer.com/'
+        : `${ANIMELIB_WEB_URL}/`);
+
+    const effectiveHeaders: Record<string, string> = {
+      'User-Agent': userAgent,
+      'Referer': referer,
+      ...(streamHeaders || {}),
+    };
+
+    // Формируем строку заголовков для FFmpeg: "Header1: Val1\r\nHeader2: Val2\r\n"
+    const headersOption =
+      Object.entries(effectiveHeaders)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\r\n') + '\r\n';
 
     return new Promise((resolve, reject) => {
       let lastUpdatedProgress = 0;
@@ -187,8 +213,8 @@ export class DownloaderService {
             `[Downloader] Поток найден: [${videoLink.playerType}] Качество: ${videoLink.quality || 'Auto'}, Озвучка: ${videoLink.voiceover || 'N/A'}, Формат: ${videoLink.format}`
           );
 
-          // Запуск скачивания через FFmpeg
-          await this.downloadTaskWithFFmpeg(task, videoLink.url);
+          // Запуск скачивания через FFmpeg с заголовками от резолвера
+          await this.downloadTaskWithFFmpeg(task, videoLink.url, videoLink.headers);
         } catch (taskErr: any) {
           console.error(`[Downloader] Ошибка при обработке задачи #${task.id}:`, taskErr?.message);
           dbService.updateDownloadStatus(task.id, 'error', 0);

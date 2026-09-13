@@ -24,6 +24,44 @@ export interface DirectVideoLinkResult {
   voiceover?: string;
   playerType?: string;
   format?: 'm3u8' | 'mp4' | 'stream';
+  headers?: Record<string, string>;
+}
+
+export function decodeKodikSrc(encoded: string): string {
+  if (!encoded) return '';
+  if (encoded.includes('//')) return encoded;
+  try {
+    const replaced = encoded.replace(/[a-zA-Z]/g, (e) => {
+      const code = e.charCodeAt(0);
+      const max = e <= 'Z' ? 90 : 122;
+      const shifted = code + 18;
+      return String.fromCharCode(max >= shifted ? shifted : shifted - 26);
+    });
+    return Buffer.from(replaced, 'base64').toString('utf-8');
+  } catch {
+    return encoded;
+  }
+}
+
+export function isNativeStreamPlayer(pl: any): boolean {
+  if (!pl) return false;
+  const pName = (pl.player || '').toLowerCase();
+  if (pName.includes('libplayer') || pName.includes('cloudcdn') || pName.includes('animelib')) {
+    return true;
+  }
+  const checkUrl = (urlVal: any): boolean => {
+    if (!urlVal) return false;
+    if (typeof urlVal === 'string') {
+      const u = urlVal.toLowerCase();
+      if ((u.includes('.m3u8') || u.includes('.mp4')) && !u.includes('kodik') && !u.includes('/seria/')) {
+        return true;
+      }
+    } else if (typeof urlVal === 'object') {
+      return Object.values(urlVal).some((v) => checkUrl(v));
+    }
+    return false;
+  };
+  return checkUrl(pl.video) || checkUrl(pl.src) || checkUrl(pl.url) || checkUrl(pl.file) || checkUrl(pl.stream);
 }
 
 export function parseEpisodeNumber(val: any): number {
@@ -309,9 +347,178 @@ export class AnimeLibService {
   }
 
   /**
+   * Разрешение реального .m3u8 потока из страницы / фрейма плеера Kodik
+   */
+  async resolveKodikStream(
+    kodikUrl: string
+  ): Promise<{ url: string; quality?: string; format?: 'm3u8' | 'mp4' | 'stream'; headers: Record<string, string> } | null> {
+    try {
+      let pageUrl = kodikUrl.trim();
+      if (pageUrl.startsWith('//')) {
+        pageUrl = 'https:' + pageUrl;
+      }
+
+      // Если в URL серии вида /seria/123/hash нет качества, Kodik ожидает /720p на конце
+      if (/\/seria\/\d+\/[a-zA-Z0-9]+$/.test(pageUrl)) {
+        pageUrl += '/720p';
+      }
+
+      const parsedUrl = new URL(pageUrl);
+      const defaultUserAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
+
+      const getRes = await axios.get(pageUrl, {
+        headers: {
+          'User-Agent': defaultUserAgent,
+          'Referer': `${ANIMELIB_WEB_URL}/`,
+          'Origin': ANIMELIB_WEB_URL,
+        },
+        timeout: 15000,
+      });
+
+      const cookies = getRes.headers['set-cookie'] || [];
+      const cookieHeader = cookies.map((c: string) => c.split(';')[0]).join('; ');
+      const html = typeof getRes.data === 'string' ? getRes.data : '';
+
+      // 1. Проверяем, нет ли уже прямого .m3u8 в скриптах страницы
+      const directM3u8Match = html.match(/[\x27"](https?:\/\/[^\x27"]+?\.(?:m3u8|mp4)[^\x27"]*?)[\x27"]/i);
+      if (directM3u8Match && !directM3u8Match[1].includes('kodikplayer.com')) {
+        return {
+          url: directM3u8Match[1],
+          quality: '720p',
+          format: directM3u8Match[1].includes('.m3u8') ? 'm3u8' : 'mp4',
+          headers: {
+            'Referer': 'https://kodikplayer.com/',
+            'User-Agent': defaultUserAgent,
+          },
+        };
+      }
+
+      // 2. Извлекаем параметры для POST /ftor
+      let parsedUrlParams: Record<string, any> = {};
+      const urlParamsMatch = html.match(/var\s+urlParams\s*=\s*[\x27"](\{.*?\})[\x27"]/);
+      if (urlParamsMatch) {
+        try {
+          parsedUrlParams = JSON.parse(urlParamsMatch[1]);
+        } catch {}
+      }
+
+      const domain =
+        html.match(/var\s+domain\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.d ||
+        'animelib.org';
+      const d_sign =
+        html.match(/var\s+d_sign\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.d_sign ||
+        '';
+      const pd =
+        html.match(/var\s+pd\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.pd ||
+        parsedUrl.hostname ||
+        'kodikplayer.com';
+      const pd_sign =
+        html.match(/var\s+pd_sign\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.pd_sign ||
+        '';
+      const ref =
+        html.match(/var\s+ref\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        (parsedUrlParams.ref ? decodeURIComponent(parsedUrlParams.ref) : `${ANIMELIB_WEB_URL}/`);
+      const ref_sign =
+        html.match(/var\s+ref_sign\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.ref_sign ||
+        '';
+
+      const type =
+        html.match(/vInfo\.type\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        html.match(/var\s+type\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        parsedUrlParams.type ||
+        'seria';
+      const hash =
+        html.match(/vInfo\.hash\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        pageUrl.match(/\/seria\/\d+\/([a-zA-Z0-9]+)/)?.[1] ||
+        parsedUrlParams.hash ||
+        '';
+      const id =
+        html.match(/vInfo\.id\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        html.match(/var\s+videoId\s*=\s*[\x27"]([^\x27"]+)[\x27"]/)?.[1] ||
+        pageUrl.match(/\/seria\/(\d+)/)?.[1] ||
+        parsedUrlParams.id ||
+        '';
+
+      const postData: Record<string, string> = {
+        d: domain,
+        d_sign,
+        pd,
+        pd_sign,
+        ref,
+        ref_sign,
+        bad_user: 'false',
+        cdn_is_working: 'true',
+        type,
+        hash,
+        id,
+      };
+
+      const postUrl = new URL('/ftor', parsedUrl.origin).href;
+      const postRes = await axios.post(postUrl, new URLSearchParams(postData).toString(), {
+        headers: {
+          'User-Agent': defaultUserAgent,
+          'Referer': pageUrl,
+          'Origin': parsedUrl.origin,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+        },
+        timeout: 15000,
+      });
+
+      const links = postRes.data?.links || {};
+      const qualities = ['1080', '720', '480', '360'];
+      let chosenRaw = '';
+      let chosenQuality = '720p';
+
+      for (const q of qualities) {
+        if (links[q] && Array.isArray(links[q]) && links[q][0]?.src) {
+          chosenRaw = links[q][0].src;
+          chosenQuality = `${q}p`;
+          break;
+        }
+      }
+
+      if (!chosenRaw && postRes.data?.link) {
+        chosenRaw = postRes.data.link;
+      }
+
+      if (!chosenRaw) {
+        console.warn(`[AnimeLib] Kodik /ftor returned no video links for ${pageUrl}`);
+        return null;
+      }
+
+      let finalStreamUrl = decodeKodikSrc(chosenRaw).trim();
+      if (finalStreamUrl.startsWith('//')) {
+        finalStreamUrl = 'https:' + finalStreamUrl;
+      }
+
+      return {
+        url: finalStreamUrl,
+        quality: chosenQuality,
+        format: finalStreamUrl.includes('.m3u8') ? 'm3u8' : 'mp4',
+        headers: {
+          'Referer': 'https://kodikplayer.com/',
+          'User-Agent': defaultUserAgent,
+        },
+      };
+    } catch (kodikErr: any) {
+      console.warn(`[AnimeLib] Failed to resolve Kodik stream from ${kodikUrl}:`, kodikErr?.message);
+      return null;
+    }
+  }
+
+  /**
    * Получение прямой ссылки на видеопоток (m3u8/mp4/stream) из плеера AnimeLib.
-   * Обращается к эндпоинтам эпизодов, находит нужный эпизод, отбирает плеер по озвучке
-   * и извлекает прямую ссылку на видеопоток.
+   * Обращается к эндпоинтам эпизодов, находит нужный эпизод, приоритезирует плееры
+   * (предпочитая нативные стримы LibPlayer/CloudCDN, затем Kodik с резолвом потока)
+   * и возвращает прямую ссылку на медиапоток и нужные HTTP-заголовки.
    */
   async getDirectVideoLink(
     mediaId: number | string,
@@ -386,89 +593,132 @@ export class AnimeLibService {
         return null;
       }
 
-      // 4. Выбор подходящего плеера
-      let selectedPlayer: any = null;
+      // 4. Приоритезация и отбор подходящих плееров
+      // Приоритет отдается нативным стримам AnimeLib (LibPlayer, CloudCDN, прямые .m3u8/.mp4)
+      const sortedPlayers = [...players].sort((a, b) => {
+        // Если указана озвучка, проверяем соответствие
+        if (targetVoiceover && targetVoiceover.trim()) {
+          const normTarget = targetVoiceover.trim().toLowerCase();
+          const aTeam = (a.team?.name || '').toLowerCase();
+          const bTeam = (b.team?.name || '').toLowerCase();
+          const aVoMatch = aTeam && (aTeam.includes(normTarget) || normTarget.includes(aTeam));
+          const bVoMatch = bTeam && (bTeam.includes(normTarget) || normTarget.includes(bTeam));
+          if (aVoMatch && !bVoMatch) return -1;
+          if (!aVoMatch && bVoMatch) return 1;
+        }
 
-      if (targetVoiceover && targetVoiceover.trim()) {
-        const normTarget = targetVoiceover.trim().toLowerCase();
-        selectedPlayer = players.find((pl: any) => {
-          const teamName = (pl.team?.name || '').toLowerCase();
-          return teamName && (teamName.includes(normTarget) || normTarget.includes(teamName));
-        });
-      }
+        // Приоритет нативным стримам над внешними плеерами
+        const aNative = isNativeStreamPlayer(a);
+        const bNative = isNativeStreamPlayer(b);
+        if (aNative && !bNative) return -1;
+        if (!aNative && bNative) return 1;
 
-      // Если указанная озвучка не найдена, выбираем озвучку (translation_type.id === 2), затем любой плеер с видео
-      if (!selectedPlayer) {
-        selectedPlayer =
-          players.find((pl: any) => pl.translation_type?.id === 2 && (pl.src || pl.video || pl.url)) ||
-          players.find((pl: any) => pl.src || pl.video || pl.url) ||
-          players[0];
-      }
+        // Приоритет озвучке (translation_type.id === 2) над субтитрами
+        const aVoType = a.translation_type?.id === 2;
+        const bVoType = b.translation_type?.id === 2;
+        if (aVoType && !bVoType) return -1;
+        if (!aVoType && bVoType) return 1;
 
-      if (!selectedPlayer) {
-        return null;
-      }
+        return 0;
+      });
 
-      // 5. Извлечение прямой ссылки
-      let rawUrl = '';
-      let detectedQuality = '720p';
+      // Перебираем кандидатов плееров, пока не найдем рабочий стрим
+      for (const player of sortedPlayers) {
+        let rawUrl = '';
+        let detectedQuality = '720p';
 
-      // Проверяем объект video (разные качества)
-      if (selectedPlayer.video) {
-        if (typeof selectedPlayer.video === 'string') {
-          rawUrl = selectedPlayer.video;
-        } else if (typeof selectedPlayer.video === 'object') {
-          const qualities = ['1080', '720', '480', '360'];
-          for (const q of qualities) {
-            if (selectedPlayer.video[q]) {
-              rawUrl = selectedPlayer.video[q];
-              detectedQuality = `${q}p`;
-              break;
+        // Проверяем объект video (разные качества)
+        if (player.video) {
+          if (typeof player.video === 'string') {
+            rawUrl = player.video;
+          } else if (typeof player.video === 'object') {
+            const qualities = ['1080', '720', '480', '360'];
+            for (const q of qualities) {
+              if (player.video[q]) {
+                rawUrl = player.video[q];
+                detectedQuality = `${q}p`;
+                break;
+              }
+            }
+            if (!rawUrl && Object.values(player.video).length > 0) {
+              rawUrl = String(Object.values(player.video)[0]);
             }
           }
-          if (!rawUrl && Object.values(selectedPlayer.video).length > 0) {
-            rawUrl = String(Object.values(selectedPlayer.video)[0]);
-          }
         }
+
+        // Проверяем поля src, url, file, stream
+        if (!rawUrl) {
+          rawUrl = player.src || player.url || player.file || player.stream || '';
+        }
+
+        if (!rawUrl) {
+          continue;
+        }
+
+        let trimmedUrl = rawUrl.trim();
+        if (trimmedUrl.startsWith('//')) {
+          trimmedUrl = 'https:' + trimmedUrl;
+        }
+
+        // Проверяем, является ли ссылка Kodik или встраиваемым фреймом
+        const isKodik =
+          trimmedUrl.includes('kodikplayer.com') ||
+          trimmedUrl.includes('kodik.info') ||
+          trimmedUrl.includes('/seria/') ||
+          (player.player || '').toLowerCase().includes('kodik');
+
+        if (isKodik) {
+          console.log(`[AnimeLib] Разрешаем реальный HLS-манифест из Kodik плеера: ${trimmedUrl}`);
+          const resolvedKodik = await this.resolveKodikStream(trimmedUrl);
+          if (resolvedKodik && resolvedKodik.url) {
+            return {
+              url: resolvedKodik.url,
+              quality: resolvedKodik.quality || detectedQuality,
+              voiceover: player.team?.name || targetVoiceover || undefined,
+              playerType: player.player || 'Kodik',
+              format: resolvedKodik.format || 'm3u8',
+              headers: resolvedKodik.headers || {
+                'Referer': 'https://kodikplayer.com/',
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+              },
+            };
+          }
+          // Если разрешение Kodik не удалось, продолжаем поиск следующего плеера
+          console.warn(`[AnimeLib] Не удалось извлечь манифест из Kodik плеера ${player.id}, проверяем следующий`);
+          continue;
+        }
+
+        // Нативный стрим AnimeLib (LibPlayer, CloudCDN, прямой .m3u8 или .mp4)
+        let format: 'm3u8' | 'mp4' | 'stream' = 'stream';
+        if (trimmedUrl.includes('.m3u8')) {
+          format = 'm3u8';
+        } else if (trimmedUrl.includes('.mp4')) {
+          format = 'mp4';
+        }
+
+        const qualMatch = trimmedUrl.match(/\b(1080|720|480|360)p?\b/i);
+        if (qualMatch) {
+          detectedQuality = `${qualMatch[1]}p`;
+        }
+
+        return {
+          url: trimmedUrl,
+          quality: detectedQuality,
+          voiceover: player.team?.name || targetVoiceover || undefined,
+          playerType: player.player || 'AnimeLib',
+          format,
+          headers: {
+            'Referer': `${ANIMELIB_WEB_URL}/`,
+            'Origin': ANIMELIB_WEB_URL,
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+          },
+        };
       }
 
-      // Проверяем поля src, url, file, stream
-      if (!rawUrl) {
-        rawUrl = selectedPlayer.src || selectedPlayer.url || selectedPlayer.file || selectedPlayer.stream || '';
-      }
-
-      if (!rawUrl) {
-        console.warn(`[AnimeLib] No video stream URL found in selected player ${selectedPlayer.player || selectedPlayer.id}`);
-        return null;
-      }
-
-      // Нормализуем URL
-      let finalUrl = rawUrl.trim();
-      if (finalUrl.startsWith('//')) {
-        finalUrl = 'https:' + finalUrl;
-      }
-
-      // Определение формата
-      let format: 'm3u8' | 'mp4' | 'stream' = 'stream';
-      if (finalUrl.includes('.m3u8')) {
-        format = 'm3u8';
-      } else if (finalUrl.includes('.mp4')) {
-        format = 'mp4';
-      }
-
-      // Определяем качество из URL или плеера, если указано
-      const qualMatch = finalUrl.match(/\b(1080|720|480|360)p?\b/i);
-      if (qualMatch) {
-        detectedQuality = `${qualMatch[1]}p`;
-      }
-
-      return {
-        url: finalUrl,
-        quality: detectedQuality,
-        voiceover: selectedPlayer.team?.name || targetVoiceover || undefined,
-        playerType: selectedPlayer.player || 'AnimeLib',
-        format,
-      };
+      console.warn(`[AnimeLib] No valid video stream could be resolved for episode ${targetEpNum} (media ID ${id})`);
+      return null;
     } catch (err: any) {
       console.error(`[AnimeLib] getDirectVideoLink error for media ${id}, ep ${episode}:`, err?.message);
       return null;
