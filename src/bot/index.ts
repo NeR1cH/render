@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard, Keyboard, Context } from 'grammy';
 import dotenv from 'dotenv';
-import { animelibService, AnimeLibService, ANIMELIB_WEB_URL } from '../services/animelib';
+import { animelibService, AnimeLibService, ANIMELIB_WEB_URL, AnimeLibBookmarkItem } from '../services/animelib';
 import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 import { getLibraryComprehensiveStats } from '../services/libraryStats';
@@ -38,10 +38,12 @@ export function getMainMenuKeyboard(): Keyboard {
     .text('🔄 Проверить серии')
     .text('📺 Мой список')
     .row()
+    .text('📥 Скачать')
     .text('📅 Календарь')
-    .text('🎲 Что глянуть?')
     .row()
+    .text('🎲 Что глянуть?')
     .text('👤 Профиль')
+    .row()
     .text('⚙️ Настройки')
     .resized()
     .persistent();
@@ -605,9 +607,10 @@ bot.command('start', async (ctx) => {
     .text('🔄 Проверить серии', 'check_updates')
     .text('📺 Мой список', 'list_watching')
     .row()
+    .text('📥 Скачать серию', 'dl_back_titles')
     .text('📅 Календарь', 'show_calendar')
-    .text('🎲 Что глянуть?', 'random_planned')
     .row()
+    .text('🎲 Что глянуть?', 'random_planned')
     .text('⚙️ Настройки', 'open_settings');
 
   await ctx.reply(welcomeText, {
@@ -624,6 +627,7 @@ bot.command('start', async (ctx) => {
 // Text-based Reply Keyboard listeners
 bot.hears('🔄 Проверить серии', (ctx) => checkAnimeUpdates(ctx, true));
 bot.hears('📺 Мой список', (ctx) => showWatchingList(ctx));
+bot.hears('📥 Скачать', (ctx) => showDownloadTitleSelection(ctx));
 bot.hears('📅 Календарь', (ctx) => showAnimeCalendar(ctx));
 bot.hears('🎲 Что глянуть?', (ctx) => showRandomRecommendation(ctx));
 bot.hears('👤 Профиль', (ctx) => showUserProfile(ctx));
@@ -631,6 +635,7 @@ bot.hears('⚙️ Настройки', (ctx) => openSettingsMenu(ctx));
 
 bot.command('check', (ctx) => checkAnimeUpdates(ctx, true));
 bot.command('watching', (ctx) => showWatchingList(ctx));
+bot.command('download', (ctx) => showDownloadTitleSelection(ctx));
 bot.command('calendar', (ctx) => showAnimeCalendar(ctx));
 bot.command('settings', (ctx) => openSettingsMenu(ctx));
 bot.command('profile', (ctx) => showUserProfile(ctx));
@@ -1202,6 +1207,234 @@ bot.callbackQuery(/^dl_(\d+)_([\d.]+)$/, async (ctx) => {
 bot.callbackQuery('noop_dl', (ctx) =>
   ctx.answerCallbackQuery({ text: 'Серия уже в очереди загрузки или скачивается!' })
 );
+
+// ==========================================
+// Interactive Download Wizard (/download)
+// ==========================================
+
+export async function showDownloadTitleSelection(ctx: Context) {
+  let watchingItems = dbService.getAllSyncItems('watching');
+
+  // If local DB is empty or missing titles, attempt to fetch from AnimeLib
+  if (watchingItems.length === 0) {
+    try {
+      const bookmarks = await animelibService.getAllWatching();
+      if (bookmarks && bookmarks.length > 0) {
+        watchingItems = dbService.getAllSyncItems('watching');
+      }
+    } catch {}
+  }
+
+  if (!watchingItems || watchingItems.length === 0) {
+    const emptyMsg = [
+      '📭 <b>Список «Смотрю» пуст.</b>',
+      '',
+      'Добавьте тайтлы в статус «Смотрю» на AnimeLib или настройте <code>ANIMELIB_COOKIE</code> в .env.',
+    ].join('\n');
+
+    if (ctx.callbackQuery) {
+      await ctx.answerCallbackQuery();
+      try {
+        return await ctx.editMessageText(emptyMsg, { parse_mode: 'HTML' });
+      } catch {
+        return await ctx.reply(emptyMsg, { parse_mode: 'HTML' });
+      }
+    }
+    return ctx.reply(emptyMsg, { parse_mode: 'HTML' });
+  }
+
+  const lines = watchingItems.map((item, idx) => {
+    const title = escapeHtml(item.rus_title || item.title);
+    const x = item.last_tracked_episode || 0;
+    const y = item.latest_episode && item.latest_episode > 0 ? item.latest_episode : '?';
+    return `${idx + 1}. «<b>${title}</b>» [Просмотрено: #${x} из #${y}]`;
+  });
+
+  const text = [
+    '📥 <b>Мастер скачивания: Выбор тайтла</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    '<i>Выберите аниме из вашего списка «Смотрю», чтобы перейти к выбору серии:</i>',
+    '',
+    ...lines,
+    '',
+    '<i>Нажмите кнопку с нужным тайтлом ниже:</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < watchingItems.length; i++) {
+    const item = watchingItems[i];
+    const name = item.rus_title || item.title;
+    const shortTitle = name.length > 30 ? name.slice(0, 28) + '…' : name;
+    kb.text(`${i + 1}. ${shortTitle}`, `dl_title:${item.media_id}`).row();
+  }
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+    } catch {
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+}
+
+export async function showEpisodeSelection(ctx: Context, mediaId: number) {
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+  const lastTracked = stored?.last_tracked_episode || 0;
+
+  let episodes = await animelibService.getAvailableEpisodes(mediaId);
+  let latest = episodes.length > 0 ? episodes[episodes.length - 1] : (stored?.latest_episode || lastTracked || 0);
+
+  // Fallback: If no episodes were fetched from API, generate 1..max range
+  if (episodes.length === 0) {
+    const maxCount = Math.max(latest, lastTracked + 1, 12);
+    episodes = Array.from({ length: maxCount }, (_, i) => i + 1);
+    latest = episodes[episodes.length - 1];
+  }
+
+  const text = [
+    `📺 <b>${escapeHtml(title)}</b>`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    `👁 <b>Последняя просмотренная:</b> <code>#${lastTracked}</code>`,
+    `📦 <b>Всего вышло:</b> <code>#${latest}</code>`,
+    '',
+    '<i>Выберите серию для скачивания:</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard();
+  let col = 0;
+  for (const ep of episodes) {
+    let badge = `#${ep}`;
+    if (ep <= lastTracked) {
+      badge = `👁 #${ep}`;
+    } else if (ep === lastTracked + 1) {
+      badge = `▶️ #${ep}`;
+    }
+    kb.text(badge, `dl_ep:${mediaId}:${ep}`);
+    col++;
+    if (col % 4 === 0) {
+      kb.row();
+    }
+  }
+  if (col % 4 !== 0) {
+    kb.row();
+  }
+  kb.text('⬅️ Назад к тайтлам', 'dl_back_titles');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+}
+
+export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: number) {
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+  const preferredVo = stored?.preferred_voiceover?.trim() || '';
+
+  let studios = await animelibService.getEpisodeStudios(mediaId, ep);
+  if (studios.length === 0) {
+    studios = POPULAR_STUDIOS.slice(0, 6);
+  }
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < studios.length; i++) {
+    const studio = studios[i];
+    const isPreferred = Boolean(
+      preferredVo &&
+      (studio.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(studio.toLowerCase()))
+    );
+    const label = isPreferred ? `⭐️ ${studio}` : studio;
+    const safeStudio = studio.length > 35 ? studio.slice(0, 35) : studio;
+    kb.text(label, `dl_run:${mediaId}:${ep}:${safeStudio}`);
+    if (i % 2 === 1) {
+      kb.row();
+    }
+  }
+  if (studios.length % 2 !== 0) {
+    kb.row();
+  }
+  kb.text('⬅️ Назад к выбору серий', `dl_back_eps:${mediaId}`);
+
+  const prefNotice = preferredVo ? `\n⭐️ <i>Предпочитаемая озвучка: <b>${escapeHtml(preferredVo)}</b></i>` : '';
+  const text = [
+    `🎙 <b>Выбор озвучки: Серия #${ep}</b>`,
+    `📺 <b>${escapeHtml(title)}</b>`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    `<i>Доступные студии озвучки для серии #${ep}:</i>${prefNotice}`,
+    '',
+    '<i>Нажмите на студию для запуска скачивания:</i>',
+  ].join('\n');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+}
+
+// Callback: Choose Title -> Show Episodes (or Back to Episodes)
+bot.callbackQuery(/^(?:dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  await ctx.answerCallbackQuery();
+  await showEpisodeSelection(ctx, mediaId);
+});
+
+// Callback: Choose Episode -> Show Voiceovers
+bot.callbackQuery(/^dl_ep:(\d+):([\d.]+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const ep = parseFloat(ctx.match[2]);
+  await ctx.answerCallbackQuery({ text: `Ищу доступные озвучки для серии #${ep}...` });
+  await showVoiceoverSelection(ctx, mediaId, ep);
+});
+
+// Callback: Choose Voiceover -> Run Download
+bot.callbackQuery(/^dl_run:(\d+):([\d.]+):(.+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const ep = parseFloat(ctx.match[2]);
+  const voiceover = ctx.match[3].trim();
+
+  await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} поставлена в очередь!` });
+
+  downloaderService.addToQueue(mediaId, ep, voiceover);
+  downloaderService.processQueue().catch((err) => {
+    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
+  });
+
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+
+  const text = [
+    '📥 <b>Серия поставлена в очередь скачивания!</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
+    `🎬 <b>Серия:</b> <code>#${ep}</code>`,
+    `🎙 <b>Озвучка:</b> <code>${escapeHtml(voiceover)}</code>`,
+    '',
+    '⚡️ <i>Загрузчик начал фоновую обработку видеопотока через FFmpeg.</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard()
+    .text('📺 Другая серия этого тайтла', `dl_title:${mediaId}`)
+    .row()
+    .text('📋 Выбрать другой тайтл', 'dl_back_titles')
+    .text('📺 Мой список', 'list_watching');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+});
+
+// Callback: Back to Titles
+bot.callbackQuery('dl_back_titles', async (ctx) => {
+  await showDownloadTitleSelection(ctx);
+});
 
 // Mark Completed
 bot.callbackQuery(/^mark_completed:(\d+):(\d+)$/, async (ctx) => {

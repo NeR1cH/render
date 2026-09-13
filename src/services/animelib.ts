@@ -201,6 +201,7 @@ export class AnimeLibService {
           rus_title: entry.rus_name,
           status: 'watching',
           last_tracked_episode: entry.current_progress_number || 0,
+          latest_episode: entry.last_item_number || 0,
         });
 
         result.push(entry);
@@ -343,6 +344,134 @@ export class AnimeLibService {
       } catch (scrapeErr: any) {
         return { latestEpisode: 0, voiceovers: [], latestVoiceovers: [] };
       }
+    }
+  }
+
+  /**
+   * Получение списка всех доступных номеров серий тайтла (отсортированных по возрастанию)
+   */
+  async getAvailableEpisodes(mediaId: number | string): Promise<number[]> {
+    const id = typeof mediaId === 'string' ? parseInt(mediaId, 10) : mediaId;
+    const headers = this.getAuthHeaders();
+    const requestHeaders = {
+      ...headers,
+      'Site-Id': '5',
+      'Referer': `${ANIMELIB_WEB_URL}/`,
+      'Origin': ANIMELIB_WEB_URL,
+    };
+
+    try {
+      let episodesData: any[] = [];
+      try {
+        const epListRes = await this.client.get('/episodes', {
+          params: { anime_id: id },
+          headers: requestHeaders,
+        });
+        episodesData = epListRes.data?.data || epListRes.data || [];
+      } catch {
+        try {
+          const epListFallback = await this.client.get(`/anime/${id}/episodes`, {
+            headers: requestHeaders,
+          });
+          episodesData = epListFallback.data?.data || epListFallback.data || [];
+        } catch {
+          episodesData = [];
+        }
+      }
+
+      const epSet = new Set<number>();
+      for (const ep of episodesData) {
+        const num = parseEpisodeNumber(ep.number ?? ep.item_number);
+        if (num > 0) epSet.add(num);
+      }
+
+      const sorted = Array.from(epSet).sort((a, b) => a - b);
+      if (sorted.length > 0) {
+        try {
+          dbService.updateLatestEpisode(id, sorted[sorted.length - 1]);
+        } catch {}
+      }
+      return sorted;
+    } catch (err: any) {
+      console.warn(`[AnimeLib] getAvailableEpisodes failed for ${id}:`, err?.message);
+      return [];
+    }
+  }
+
+  /**
+   * Получение списка реально доступных студий озвучки для конкретной серии (исключая субтитры)
+   */
+  async getEpisodeStudios(mediaId: number | string, episode: number): Promise<string[]> {
+    const id = typeof mediaId === 'string' ? parseInt(mediaId, 10) : mediaId;
+    const targetEpNum = parseEpisodeNumber(episode);
+    const headers = this.getAuthHeaders();
+    const requestHeaders = {
+      ...headers,
+      'Site-Id': '5',
+      'Referer': `${ANIMELIB_WEB_URL}/`,
+      'Origin': ANIMELIB_WEB_URL,
+    };
+
+    try {
+      let episodesData: any[] = [];
+      try {
+        const epListRes = await this.client.get('/episodes', {
+          params: { anime_id: id },
+          headers: requestHeaders,
+        });
+        episodesData = epListRes.data?.data || epListRes.data || [];
+      } catch {
+        try {
+          const epFallback = await this.client.get(`/anime/${id}/episodes`, {
+            headers: requestHeaders,
+          });
+          episodesData = epFallback.data?.data || epFallback.data || [];
+        } catch {
+          episodesData = [];
+        }
+      }
+
+      let matchingEp = episodesData.find(
+        (ep: any) => parseEpisodeNumber(ep.number ?? ep.item_number) === targetEpNum
+      );
+
+      if (!matchingEp && episodesData.length === 1 && (targetEpNum === 1 || targetEpNum === 0)) {
+        matchingEp = episodesData[0];
+      }
+
+      if (!matchingEp) {
+        return [];
+      }
+
+      let players: any[] = Array.isArray(matchingEp.players) ? matchingEp.players : [];
+      if (players.length === 0 && matchingEp.id) {
+        try {
+          const epDetailRes = await this.client.get(`/episodes/${matchingEp.id}`, {
+            headers: requestHeaders,
+          });
+          players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
+        } catch (detailErr: any) {
+          console.warn(`[AnimeLib] Failed to load episode detail for ${matchingEp.id}:`, detailErr?.message);
+        }
+      }
+
+      const studiosSet = new Set<string>();
+      for (const pl of players) {
+        // Отсекаем субтитры (translation_type.id === 1) и пустые имена
+        const isSub =
+          pl.translation_type?.id === 1 ||
+          (pl.translation_type?.name && pl.translation_type.name.toLowerCase().includes('субтит')) ||
+          (pl.team?.name && pl.team.name.toLowerCase().includes('subtitle'));
+        const teamName = pl.team?.name?.trim();
+        if (teamName && !isSub) {
+          studiosSet.add(teamName);
+        }
+      }
+
+      return Array.from(studiosSet);
+    } catch (err: any) {
+      console.warn(`[AnimeLib] getEpisodeStudios failed for ${id} ep ${episode}:`, err?.message);
+      return [];
     }
   }
 

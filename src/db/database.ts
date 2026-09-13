@@ -55,6 +55,11 @@ try {
 } catch {
 }
 
+try {
+  db.exec('ALTER TABLE animelib_sync ADD COLUMN latest_episode INTEGER DEFAULT 0');
+} catch {
+}
+
 db.exec('CREATE TABLE IF NOT EXISTS user_preferences (' +
   'user_id TEXT PRIMARY KEY, ' +
   'favorite_voiceovers TEXT DEFAULT "[]", ' +
@@ -129,6 +134,7 @@ export interface AnimeLibSyncRecord {
   rus_title?: string;
   status?: string;
   last_tracked_episode: number;
+  latest_episode?: number;
   preferred_voiceover?: string;
   shiki_id?: number;
   shiki_synced: number;
@@ -236,13 +242,14 @@ export const dbService = {
   },
 
   upsertSyncItem(item: Partial<AnimeLibSyncRecord> & { media_id: number; title: string }) {
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
       'status = excluded.status, ' +
       'last_tracked_episode = MAX(COALESCE(animelib_sync.last_tracked_episode, 0), COALESCE(excluded.last_tracked_episode, 0)), ' +
+      'latest_episode = MAX(COALESCE(animelib_sync.latest_episode, 0), COALESCE(excluded.latest_episode, 0)), ' +
       'preferred_voiceover = COALESCE(excluded.preferred_voiceover, animelib_sync.preferred_voiceover), ' +
       'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
@@ -255,6 +262,7 @@ export const dbService = {
       item.rus_title || null,
       item.status || null,
       item.last_tracked_episode || 0,
+      item.latest_episode || 0,
       item.preferred_voiceover || null,
       item.shiki_id || null,
       item.shiki_synced || 0,
@@ -265,13 +273,14 @@ export const dbService = {
 
   batchUpsertSyncItems(items: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }>) {
     if (!items || items.length === 0) return;
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
       'status = excluded.status, ' +
       'last_tracked_episode = MAX(COALESCE(animelib_sync.last_tracked_episode, 0), COALESCE(excluded.last_tracked_episode, 0)), ' +
+      'latest_episode = MAX(COALESCE(animelib_sync.latest_episode, 0), COALESCE(excluded.latest_episode, 0)), ' +
       'preferred_voiceover = COALESCE(excluded.preferred_voiceover, animelib_sync.preferred_voiceover), ' +
       'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
@@ -288,6 +297,7 @@ export const dbService = {
           item.rus_title || null,
           item.status || null,
           item.last_tracked_episode || 0,
+          item.latest_episode || 0,
           item.preferred_voiceover || null,
           item.shiki_id || null,
           item.shiki_synced || 0,
@@ -300,6 +310,11 @@ export const dbService = {
 
   updateTrackedEpisode(mediaId: number, episode: number) {
     const stmt = db.prepare('UPDATE animelib_sync SET last_tracked_episode = MAX(COALESCE(last_tracked_episode, 0), ?), last_checked_at = ? WHERE media_id = ?');
+    stmt.run(episode, Date.now(), mediaId);
+  },
+
+  updateLatestEpisode(mediaId: number, episode: number) {
+    const stmt = db.prepare('UPDATE animelib_sync SET latest_episode = MAX(COALESCE(latest_episode, 0), ?), last_checked_at = ? WHERE media_id = ?');
     stmt.run(episode, Date.now(), mediaId);
   },
 
