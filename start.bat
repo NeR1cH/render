@@ -102,34 +102,32 @@ pause
 goto :menu
 
 :bot
-color 0E
-echo.
+cls
+echo(
 echo       [ STARTING BOT ]
 echo       Шаг 1/2: Проверка связи с Shikimori...
 echo       ------------------------------------------------------------------
 call !PM! run bot:check
 set "CHECK_EXIT_CODE=%errorlevel%"
-if not "%CHECK_EXIT_CODE%"=="0" (
-    color 0E
-    echo.
-    echo       [WARN] Проверка авторизации Shikimori вернула код: %CHECK_EXIT_CODE%
-    echo       Бот запустится в публичном режиме (чтение/поиск/скачивание доступны).
-    echo.
-) else (
-    color 0A
-    echo.
-    echo       [OK] Связь с Shikimori в норме.
-    echo.
-)
 
+if "%CHECK_EXIT_CODE%"=="0" goto :bot_shiki_ok
+
+color 0E
+echo       [WARN] Режим Shikimori: публичный (гостевой).
+goto :bot_start_exec
+
+:bot_shiki_ok
+color 0A
+echo       [OK] Связь с Shikimori в норме.
+
+:bot_start_exec
 color 0A
 echo       Шаг 2/2: Запуск Telegram-бота...
 echo       ------------------------------------------------------------------
 call !PM! run bot:start
 set "BOT_EXIT_CODE=%errorlevel%"
-echo.
+echo(
 echo       Бот остановлен с кодом: %BOT_EXIT_CODE%
-echo.
 pause
 goto :menu
 
