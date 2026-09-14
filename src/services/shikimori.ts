@@ -1,6 +1,8 @@
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
-import { dbService, getTokens, saveTokens } from '../db/database.js';
+import { dbService, getTokens, saveTokens, deleteTokens } from '../db/database.js';
 import { animelibService, AnimeLibService } from './animelib.js';
+
+let isShikimoriAuthRevoked = false;
 
 export interface UserExclusionData {
   excludedIds: Set<number>;
@@ -59,7 +61,19 @@ export const shikimoriClient = axios.create({
   },
 });
 
+export const shikimoriPublicClient = axios.create({
+  baseURL: SHIKIMORI_URL,
+  timeout: 15000,
+  headers: {
+    'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: boykonik2@gmail.com)',
+    'Content-Type': 'application/json',
+  },
+});
+
 shikimoriClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  if (isShikimoriAuthRevoked) {
+    return config;
+  }
   const tokens = getTokens('shikimori');
   const token = tokens?.access_token || process.env.SHIKIMORI_ACCESS_TOKEN;
   if (token) {
@@ -77,10 +91,14 @@ shikimoriClient.interceptors.response.use(
     }
 
     originalRequest._retry = true;
+    if (isShikimoriAuthRevoked) {
+      return Promise.reject(error);
+    }
+
     const tokens = getTokens('shikimori');
     const refreshToken = tokens?.refresh_token || process.env.SHIKIMORI_REFRESH_TOKEN;
     if (!refreshToken) {
-      console.error('[Shikimori] Missing refresh token for session renewal.');
+      console.warn('[Shikimori] Токен обновления сессии отсутствует.');
       return Promise.reject(error);
     }
 
@@ -94,7 +112,7 @@ shikimoriClient.interceptors.response.use(
       });
       const refreshRes = await axios.post(`${SHIKIMORI_URL}/oauth/token`, params.toString(), {
         headers: {
-          'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: githubsup972@gmail.com)',
+          'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: boykonik2@gmail.com)',
           'Content-Type': 'application/x-www-form-urlencoded',
         },
       });
@@ -102,8 +120,23 @@ shikimoriClient.interceptors.response.use(
       saveTokens('shikimori', access_token, newRefreshToken || refreshToken, expires_in || 86400);
       originalRequest.headers.Authorization = `Bearer ${access_token}`;
       return shikimoriClient(originalRequest);
-    } catch (refreshError) {
-      console.error('[Shikimori] Token refresh failed:', refreshError);
+    } catch (refreshError: any) {
+      const isInvalidGrant =
+        refreshError?.response?.status === 400 ||
+        refreshError?.response?.data?.error === 'invalid_grant';
+
+      if (isInvalidGrant) {
+        console.warn(
+          '[Shikimori] Refresh token недействителен или отозван (invalid_grant). Токены очищены, запросы переведены в публичный режим.'
+        );
+        isShikimoriAuthRevoked = true;
+        deleteTokens('shikimori');
+      } else {
+        console.error(
+          '[Shikimori] Token refresh failed:',
+          refreshError?.response?.data?.error_description || refreshError?.message || 'Unknown error'
+        );
+      }
       return Promise.reject(refreshError);
     }
   }
@@ -193,9 +226,16 @@ export class ShikimoriService {
   }
 
   private async getHeaders() {
-    const token = process.env.SHIKIMORI_ACCESS_TOKEN;
+    if (isShikimoriAuthRevoked) {
+      return {
+        'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: boykonik2@gmail.com)',
+        'Content-Type': 'application/json',
+      };
+    }
+    const tokens = getTokens('shikimori');
+    const token = tokens?.access_token || process.env.SHIKIMORI_ACCESS_TOKEN;
     return {
-      'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'ANIME ASSISTANT v2.0',
+      'User-Agent': process.env.SHIKIMORI_USER_AGENT || 'Anime Tracker Bot v2.0 (contact: boykonik2@gmail.com)',
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
@@ -227,14 +267,13 @@ export class ShikimoriService {
     `;
 
     try {
-      const response = await this.client.post(
+      const response = await shikimoriPublicClient.post(
         this.graphqlUrl,
-        { query, variables: { search: searchTitle, limit } },
-        { headers: await this.getHeaders() }
+        { query, variables: { search: searchTitle, limit } }
       );
       return response.data?.data?.animes || [];
     } catch (err: any) {
-      console.error(`[Shikimori GraphQL Search Error for "${searchTitle}"]`, err.message);
+      console.error(`[Shikimori GraphQL Search Error for "${searchTitle}"]`, err?.message || err);
       return [];
     }
   }
@@ -266,25 +305,24 @@ export class ShikimoriService {
     `;
 
     try {
-      const response = await this.client.post(
+      const response = await shikimoriPublicClient.post(
         this.graphqlUrl,
-        { query, variables: { id: String(id) } },
-        { headers: await this.getHeaders() }
+        { query, variables: { id: String(id) } }
       );
       const list = response.data?.data?.animes;
       return list && list.length > 0 ? list[0] : null;
     } catch (err: any) {
-      console.error(`[Shikimori GraphQL GetById Error for ${id}]`, err.message);
+      console.error(`[Shikimori GraphQL GetById Error for ${id}]`, err?.message || err);
       return null;
     }
   }
 
   async getCalendar(): Promise<any[]> {
     try {
-      const res = await this.client.get('/api/calendar', { headers: await this.getHeaders() });
+      const res = await shikimoriPublicClient.get('/api/calendar');
       return res.data || [];
     } catch (err: any) {
-      console.error('[Shikimori Calendar Error]', err.message);
+      console.error('[Shikimori Calendar Error]', err?.message || err);
       return [];
     }
   }

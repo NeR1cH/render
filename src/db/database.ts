@@ -197,6 +197,12 @@ export function getTokens(service: string): OAuthTokenRecord | undefined {
   return db.prepare('SELECT * FROM oauth_tokens WHERE service = ?').get(service) as unknown as OAuthTokenRecord | undefined;
 }
 
+export function deleteTokens(service: string): void {
+  try {
+    db.prepare('DELETE FROM oauth_tokens WHERE service = ?').run(service);
+  } catch {}
+}
+
 export const dbService = {
   transaction<T>(fn: () => T): T {
     db.exec('BEGIN IMMEDIATE');
