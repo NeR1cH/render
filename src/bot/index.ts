@@ -5,6 +5,8 @@ import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 import { getLibraryComprehensiveStats } from '../services/libraryStats';
 import { downloaderService } from '../services/downloader';
+import { sourceRegistry } from '../plugins/SourcePluginRegistry.js';
+import { StreamResult } from '../plugins/types.js';
 
 dotenv.config();
 
@@ -22,6 +24,7 @@ export { POPULAR_STUDIOS };
 // In-memory cache for studio voiceovers per title and per episode to guarantee <64 byte callback_data
 export const titleVoiceoversCache = new Map<number, string[]>();
 export const episodeVoiceoversCache = new Map<string, string[]>();
+export const episodeStreamsCache = new Map<string, StreamResult[]>();
 
 // ==========================================
 // Persistent Bottom Menu (Reply Keyboard)
@@ -188,7 +191,7 @@ export function buildAnimeCardKeyboard(item: {
   // Row 1: Action Buttons (Скачать, Отметить, Настроить озвучку)
   if (item.mediaId) {
     const epToMark = item.newEpisode ?? ((item.currentEpisode || 0) + 1);
-    kb.text('📥 Скачать', `dl_${item.mediaId}_${epToMark}`);
+    kb.text('📥 Скачать', `dl:${item.mediaId}:${epToMark}`);
     kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
     kb.row();
     kb.text('🎙 Настроить озвучку', `setup_vo:${item.mediaId}`);
@@ -1539,54 +1542,199 @@ bot.callbackQuery(/^add_ep:(\d+):([\d.]+):(\d+)$/, async (ctx) => {
 
 bot.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery({ text: 'Серия уже отмечена как просмотренная!' }));
 
-// Download button callback: dl_<media_id>_<ep>
-bot.callbackQuery(/^dl_(\d+)_([\d.]+)$/, async (ctx) => {
-  const mediaId = parseInt(ctx.match[1], 10);
-  const episode = parseFloat(ctx.match[2]);
-
-  // 1. Быстрый ответ пользователю
-  await ctx.answerCallbackQuery({ text: '⏳ Серия добавлена в очередь загрузки!' });
-
-  // 2. Определение предпочтительной озвучки (из тайтла или из общих настроек)
+export async function queueAndStartDownload(
+  ctx: Context,
+  mediaId: number,
+  episode: number,
+  voiceover?: string,
+  quality?: string,
+  sourceName?: string
+): Promise<void> {
   const stored = dbService.getSyncItemByMediaId(mediaId);
-  let targetVoiceover = stored?.preferred_voiceover;
-  if (!targetVoiceover) {
-    const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
-    const prefs = dbService.getUserPreferences(userId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+
+  const text = [
+    '📥 <b>Серия поставлена в очередь скачивания!</b>',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
+    `🎬 <b>Серия:</b> <code>#${episode}</code>`,
+    `🎙 <b>Озвучка:</b> <code>${escapeHtml(voiceover || 'По умолчанию')}</code>`,
+    `💎 <b>Качество:</b> <code>${escapeHtml(quality || 'Auto')}</code> (<i>${escapeHtml(sourceName || 'AnimeLib')}</i>)`,
+    '',
+    '⏳ <i>Инициализация загрузки и обработка сегментов...</i>',
+  ].join('\n');
+
+  const kb = new InlineKeyboard()
+    .text('📺 Другая серия этого тайтла', `dl_t:${mediaId}`)
+    .row()
+    .text('📋 Выбрать другой тайтл', 'dl_back_titles')
+    .text('📺 Мой список', 'list_watching');
+
+  let sentMsg: any = null;
+  try {
+    sentMsg = await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    sentMsg = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+
+  const chatId = ctx.chat?.id ? String(ctx.chat.id) : undefined;
+  const messageId =
+    sentMsg && typeof sentMsg === 'object' && 'message_id' in sentMsg
+      ? (sentMsg.message_id as number)
+      : undefined;
+
+  downloaderService.addToQueue(mediaId, episode, voiceover, chatId, messageId);
+  downloaderService.processQueue().catch((err: unknown) => {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', errMessage);
+  });
+}
+
+export async function handleDownloadStreamSelection(
+  ctx: Context,
+  mediaId: number,
+  ep: number
+): Promise<void> {
+  const stored = dbService.getSyncItemByMediaId(mediaId);
+  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
+  const preferredVo = dbService.getPreferredVoiceover(mediaId) || stored?.preferred_voiceover;
+
+  let streams: StreamResult[] = [];
+  try {
+    streams = await sourceRegistry.getAllStreams({
+      mediaId,
+      episode: ep,
+      voiceover: preferredVo || undefined,
+    });
+  } catch (err: unknown) {
+    const errMessage = err instanceof Error ? err.message : String(err);
+    console.warn(`[Bot] Ошибка получения стримов для ${mediaId} ep ${ep}:`, errMessage);
+  }
+
+  // Если стримы не найдены
+  if (!streams || streams.length === 0) {
+    const emptyText = [
+      `📺 <b>${escapeHtml(title)}</b>`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      `⚠️ <b>Видеопотоки для серии #${ep} не найдены</b>`,
+      '',
+      '<i>Плееры AnimeLib и Kodik в данный момент не вернули рабочие стримы для этой серии. Попробуйте позже или выберите другую серию.</i>',
+    ].join('\n');
+
+    const emptyKb = new InlineKeyboard()
+      .text('🔄 Попробовать снова', `dl:${mediaId}:${ep}`)
+      .row()
+      .text('📺 К выбору серий', `dl_t:${mediaId}`)
+      .text('❌ Закрыть', 'close_menu');
+
     try {
-      const favs: string[] = JSON.parse(prefs.favorite_voiceovers || '[]');
-      if (favs.length > 0) targetVoiceover = favs[0];
+      await ctx.editMessageText(emptyText, { parse_mode: 'HTML', reply_markup: emptyKb });
+    } catch {
+      await ctx.reply(emptyText, { parse_mode: 'HTML', reply_markup: emptyKb });
+    }
+    return;
+  }
+
+  // Если стрим ровно 1 — сразу запускаем скачивание
+  if (streams.length === 1) {
+    const stream = streams[0];
+    await queueAndStartDownload(ctx, mediaId, ep, stream.voiceover, stream.quality, stream.source);
+    return;
+  }
+
+  // Если настроена любимая озвучка, поднимаем совпадающий стрим наверх
+  if (preferredVo && preferredVo.trim()) {
+    const norm = preferredVo.trim().toLowerCase();
+    streams.sort((a, b) => {
+      const aMatch = a.voiceover && (a.voiceover.toLowerCase().includes(norm) || norm.includes(a.voiceover.toLowerCase()));
+      const bMatch = b.voiceover && (b.voiceover.toLowerCase().includes(norm) || norm.includes(b.voiceover.toLowerCase()));
+      if (aMatch && !bMatch) return -1;
+      if (!aMatch && bMatch) return 1;
+      return 0;
+    });
+  }
+
+  // Сохраняем стримы в сессионный кэш для короткого callback_data (<64 байт)
+  const key = `${mediaId}:${ep}`;
+  episodeStreamsCache.set(key, streams);
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < streams.length; i++) {
+    const s = streams[i];
+    const isPreferred = Boolean(
+      preferredVo &&
+      s.voiceover &&
+      (s.voiceover.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(s.voiceover.toLowerCase()))
+    );
+    const star = isPreferred ? '⭐️ ' : '';
+    const qText = s.quality || 'Auto';
+    const voText = s.voiceover || s.source || 'Native';
+    const rawLabel = `${star}[${qText}] ${voText}`;
+    const label = rawLabel.length > 28 ? `${rawLabel.slice(0, 27)}…` : rawLabel;
+
+    // callback_data ультракомпактный: dq:<mediaId>:<ep>:<index> (< 18 байт)
+    kb.text(label, `dq:${mediaId}:${ep}:${i}`);
+    if (i % 2 === 1) {
+      kb.row();
+    }
+  }
+  if (streams.length % 2 !== 0) {
+    kb.row();
+  }
+
+  kb.text('⬅️ К выбору серий', `dl_t:${mediaId}`)
+    .text('❌ Закрыть', 'close_menu');
+
+  const prefNotice = preferredVo ? `\n⭐️ <i>Ваша озвучка: <b>${escapeHtml(preferredVo)}</b></i>` : '';
+  const text = [
+    `📥 <b>Выбор видеопотока: Серия #${ep}</b>`,
+    `📺 <b>${escapeHtml(title)}</b>`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    `<i>Найдено доступных вариантов: <b>${streams.length}</b></i>${prefNotice}`,
+    '',
+    '<i>Выберите качество и плеер для запуска загрузки:</i>',
+  ].join('\n');
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+}
+
+// Download request callback: dl:<media_id>:<ep> or legacy dl_<media_id>_<ep>
+bot.callbackQuery(/^(?:dl:|dl_|dl_e:|dl_ep:)(\d+)[:_]([\d.]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: '🔍 Поиск видеопотоков...' });
+  const mediaId = parseInt(ctx.match[1], 10);
+  const ep = parseFloat(ctx.match[2]);
+  await handleDownloadStreamSelection(ctx, mediaId, ep);
+});
+
+// Download stream selection callback: dq:<media_id>:<ep>:<stream_index> (<64 байт)
+bot.callbackQuery(/^(?:dq:|dq_)(\d+)[:_]([\d.]+)[:_](\d+)(?:[:_](\d+))?$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: '📥 Постановка в очередь...' });
+  const mediaId = parseInt(ctx.match[1], 10);
+  const ep = parseFloat(ctx.match[2]);
+  const streamIdx = parseInt(ctx.match[3], 10);
+
+  const key = `${mediaId}:${ep}`;
+  let streams = episodeStreamsCache.get(key);
+  if (!streams || !streams[streamIdx]) {
+    try {
+      streams = await sourceRegistry.getAllStreams({ mediaId, episode: ep });
+      episodeStreamsCache.set(key, streams);
     } catch {}
   }
 
-  // 3. Постановка задачи в очередь загрузки
-  downloaderService.addToQueue(mediaId, episode, targetVoiceover || undefined);
-
-  // 4. Фоновый запуск обработки очереди
-  downloaderService.processQueue().catch((err) => {
-    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
-  });
-
-  // 5. Обновление inline-кнопок: заменяем кнопку скачивания на "⏳ В очереди загрузки"
-  if (ctx.msg?.reply_markup?.inline_keyboard) {
-    const targetCallback = `dl_${mediaId}_${episode}`;
-    const updatedRows = ctx.msg.reply_markup.inline_keyboard.map((row) =>
-      row.map((btn) => {
-        if ('callback_data' in btn && (btn.callback_data === targetCallback || btn.callback_data.startsWith(`dl_${mediaId}_`))) {
-          return { text: '⏳ В очереди загрузки', callback_data: 'noop_dl' };
-        }
-        return btn;
-      })
-    );
-
-    try {
-      await ctx.editMessageReplyMarkup({
-        reply_markup: { inline_keyboard: updatedRows },
-      });
-    } catch {
-      // Игнорируем ошибку, если сообщение не изменилось
-    }
-  }
+  const selectedStream = streams?.[streamIdx];
+  await queueAndStartDownload(
+    ctx,
+    mediaId,
+    ep,
+    selectedStream?.voiceover,
+    selectedStream?.quality,
+    selectedStream?.source
+  );
 });
 
 bot.callbackQuery('noop_dl', (ctx) =>
@@ -1761,7 +1909,7 @@ export async function showEpisodeSelection(ctx: Context, mediaId: number) {
     } else if (ep === lastTracked + 1) {
       badge = `▶️ #${ep}`;
     }
-    kb.text(badge, `dl_e:${mediaId}:${ep}`);
+    kb.text(badge, `dl:${mediaId}:${ep}`);
     col++;
     if (col % 4 === 0) {
       kb.row();
@@ -1780,58 +1928,6 @@ export async function showEpisodeSelection(ctx: Context, mediaId: number) {
   }
 }
 
-export async function showVoiceoverSelection(ctx: Context, mediaId: number, ep: number) {
-  const stored = dbService.getSyncItemByMediaId(mediaId);
-  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
-  const preferredVo = stored?.preferred_voiceover?.trim() || '';
-
-  let studios = await animelibService.getEpisodeStudios(mediaId, ep);
-  if (studios.length === 0) {
-    studios = await animelibService.getTitleVoiceovers(mediaId);
-  }
-  if (studios.length === 0) {
-    studios = POPULAR_STUDIOS;
-  }
-
-  // Кэшируем студии серии для безопасного <64 байт callback_data
-  episodeVoiceoversCache.set(`${mediaId}:${ep}`, studios);
-
-  const kb = new InlineKeyboard();
-  for (let i = 0; i < studios.length; i++) {
-    const studio = studios[i];
-    const isPreferred = Boolean(
-      preferredVo &&
-      (studio.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(studio.toLowerCase()))
-    );
-    const label = isPreferred ? `⭐️ ${studio}` : studio;
-    kb.text(label, `dl_r:${mediaId}:${ep}:${i}`);
-    if (i % 2 === 1) {
-      kb.row();
-    }
-  }
-  if (studios.length % 2 !== 0) {
-    kb.row();
-  }
-  kb.text('⬅️ Назад', `dl_t:${mediaId}`)
-    .text('❌ Закрыть меню', 'close_menu');
-
-  const prefNotice = preferredVo ? `\n⭐️ <i>Предпочитаемая озвучка: <b>${escapeHtml(preferredVo)}</b></i>` : '';
-  const text = [
-    `🎙 <b>Выбор озвучки: Серия #${ep}</b>`,
-    `📺 <b>${escapeHtml(title)}</b>`,
-    '━━━━━━━━━━━━━━━━━━━━',
-    `<i>Доступные студии озвучки для серии #${ep}:</i>${prefNotice}`,
-    '',
-    '<i>Нажмите на студию для запуска скачивания:</i>',
-  ].join('\n');
-
-  try {
-    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
-  } catch {
-    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
-  }
-}
-
 // Callback: Choose Title -> Show Episodes (or Back to Episodes)
 bot.callbackQuery(/^(?:dl_t|dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
   const mediaId = parseInt(ctx.match[1], 10);
@@ -1839,69 +1935,9 @@ bot.callbackQuery(/^(?:dl_t|dl_title|dl_back_eps):(\d+)$/, async (ctx) => {
   await showEpisodeSelection(ctx, mediaId);
 });
 
-// Callback: Choose Episode -> Show Voiceovers (or auto-select preferred voiceover)
-bot.callbackQuery(/^(?:dl_e|dl_ep):(\d+):([\d.]+)$/, async (ctx) => {
-  const mediaId = parseInt(ctx.match[1], 10);
-  const ep = parseFloat(ctx.match[2]);
-
-  const stored = dbService.getSyncItemByMediaId(mediaId);
-  const preferredVo = dbService.getPreferredVoiceover(mediaId) || stored?.preferred_voiceover;
-
-  // Если для этого тайтла настроена индивидуальная озвучка, проверяем её наличие для серии
-  if (preferredVo && preferredVo.trim()) {
-    const normPref = preferredVo.trim().toLowerCase();
-    const studios = await animelibService.getEpisodeStudios(mediaId, ep);
-    const matchedStudio = studios.find(
-      (s) => s.toLowerCase().includes(normPref) || normPref.includes(s.toLowerCase())
-    );
-
-    // Если студия найдена (или API не отдал список студий и выбор происходит в плеере)
-    if (matchedStudio || studios.length === 0) {
-      const finalVoiceover = matchedStudio || preferredVo;
-      await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} (${finalVoiceover})!` });
-
-      const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
-      const text = [
-        '📥 <b>Серия поставлена в очередь скачивания!</b>',
-        '━━━━━━━━━━━━━━━━━━━━',
-        `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
-        `🎬 <b>Серия:</b> <code>#${ep}</code>`,
-        `🎙 <b>Ваша выбранная озвучка:</b> <code>${escapeHtml(finalVoiceover)}</code>`,
-        '',
-        '⏳ <i>Инициализация видеопотока и запуск FFmpeg...</i>',
-      ].join('\n');
-
-      const kb = new InlineKeyboard()
-        .text('📺 Другая серия этого тайтла', `dl_t:${mediaId}`)
-        .row()
-        .text('📋 Выбрать другой тайтл', 'dl_back_titles')
-        .text('📺 Мой список', 'list_watching');
-
-      let sentMsg: any = null;
-      try {
-        sentMsg = await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
-      } catch {
-        sentMsg = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
-      }
-
-      const chatId = ctx.chat?.id ? String(ctx.chat.id) : undefined;
-      const messageId = sentMsg && typeof sentMsg === 'object' && 'message_id' in sentMsg ? sentMsg.message_id : undefined;
-
-      downloaderService.addToQueue(mediaId, ep, finalVoiceover, chatId, messageId);
-      downloaderService.processQueue().catch((err) => {
-        console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
-      });
-      return;
-    }
-  }
-
-  // Если индивидуальная озвучка не настроена или отсутствует для этой серии — открываем выбор
-  await ctx.answerCallbackQuery({ text: `Ищу доступные озвучки для серии #${ep}...` });
-  await showVoiceoverSelection(ctx, mediaId, ep);
-});
-
-// Callback: Choose Voiceover -> Run Download
+// Legacy voiceover selection callback: dl_r:<mediaId>:<ep>:<index>
 bot.callbackQuery(/^(?:dl_r|dl_run):(\d+):([\d.]+):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: '📥 Постановка в очередь...' });
   const mediaId = parseInt(ctx.match[1], 10);
   const ep = parseFloat(ctx.match[2]);
   const rawVo = ctx.match[3].trim();
@@ -1922,41 +1958,7 @@ bot.callbackQuery(/^(?:dl_r|dl_run):(\d+):([\d.]+):(.+)$/, async (ctx) => {
     voiceover = rawVo;
   }
 
-  await ctx.answerCallbackQuery({ text: `📥 Серия #${ep} поставлена в очередь!` });
-
-  const stored = dbService.getSyncItemByMediaId(mediaId);
-  const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
-
-  const text = [
-    '📥 <b>Серия поставлена в очередь скачивания!</b>',
-    '━━━━━━━━━━━━━━━━━━━━',
-    `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
-    `🎬 <b>Серия:</b> <code>#${ep}</code>`,
-    `🎙 <b>Озвучка:</b> <code>${escapeHtml(voiceover)}</code>`,
-    '',
-    '⏳ <i>Инициализация видеопотока и запуск FFmpeg...</i>',
-  ].join('\n');
-
-  const kb = new InlineKeyboard()
-    .text('📺 Другая серия этого тайтла', `dl_t:${mediaId}`)
-    .row()
-    .text('📋 Выбрать другой тайтл', 'dl_back_titles')
-    .text('📺 Мой список', 'list_watching');
-
-  let sentMsg: any = null;
-  try {
-    sentMsg = await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
-  } catch {
-    sentMsg = await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
-  }
-
-  const chatId = ctx.chat?.id ? String(ctx.chat.id) : undefined;
-  const messageId = sentMsg && typeof sentMsg === 'object' && 'message_id' in sentMsg ? sentMsg.message_id : undefined;
-
-  downloaderService.addToQueue(mediaId, ep, voiceover, chatId, messageId);
-  downloaderService.processQueue().catch((err) => {
-    console.error('[Downloader Bot] Ошибка фоновой обработки очереди:', err);
-  });
+  await queueAndStartDownload(ctx, mediaId, ep, voiceover);
 });
 
 // ==========================================
