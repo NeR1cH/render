@@ -26,17 +26,19 @@ echo       Package Manager: !PM!
 echo       Branch:          feat/ai-github-bridge
 echo.
 echo       +--------------------------------------------------------------------+
-echo       ^|  [1]  GIT PULL     -- Подтянуть обновления из репозитория         ^|
-echo       ^|  [2]  BUILD CHECK  -- Проверить компиляцию (!PM! run build)        ^|
-echo       ^|  [3]  RUN ALL      -- Запуск веб-сервера и API (!PM! run dev)     ^|
-echo       ^|  [4]  RUN BOT      -- Запуск Telegram-бота (!PM! run bot)         ^|
-echo       ^|  [5]  AI BRIDGE    -- Gemini AI Bridge workflow                   ^|
-echo       ^|  [6]  GIT STATUS   -- Проверка измененных файлов                  ^|
-echo       ^|  [Q]  EXIT         -- Выход                                       ^|
+echo       ^|  [1]  GIT PULL       -- Подтянуть обновления из репозитория       ^|
+echo       ^|  [2]  BUILD CHECK    -- Проверить компиляцию (!PM! run build)      ^|
+echo       ^|  [3]  RUN ALL        -- Запуск веб-сервера и API (!PM! run dev)   ^|
+echo       ^|  [4]  RUN BOT        -- Запуск Telegram-бота (!PM! run bot)       ^|
+echo       ^|  [5]  AI BRIDGE      -- Gemini AI Bridge workflow                 ^|
+echo       ^|  [6]  GIT STATUS     -- Проверка измененных файлов                ^|
+echo       ^|  [7]  CREATE RELEASE -- Мастер создания релиза GitHub             ^|
+echo       ^|  [Q]  EXIT           -- Выход                                     ^|
 echo       +--------------------------------------------------------------------+
 echo.
-choice /c 123456Q /n /m "       Выберите действие [1-6, Q]: "
-if errorlevel 7 goto :end
+choice /c 1234567Q /n /m "       Выберите действие [1-7, Q]: "
+if errorlevel 8 goto :end
+if errorlevel 7 goto :release
 if errorlevel 6 goto :gitstatus
 if errorlevel 5 goto :bridge
 if errorlevel 4 goto :bot
@@ -165,6 +167,26 @@ echo       [ GIT STATUS ]
 echo       Текущее состояние локальной ветки и файлов:
 echo       ------------------------------------------------------------------
 call git status
+echo.
+pause
+goto :menu
+
+:release
+color 0B
+echo.
+echo       [ CREATE RELEASE ]
+echo       Запуск мастера создания релиза GitHub...
+echo       ------------------------------------------------------------------
+call !PM! run release
+set "RELEASE_CODE=%errorlevel%"
+echo.
+if "%RELEASE_CODE%"=="0" (
+    color 0A
+    echo       [OK] Мастер релизов успешно завершил работу.
+) else (
+    color 4F
+    echo       [ERROR] Ошибка при создании релиза - код: %RELEASE_CODE%
+)
 echo.
 pause
 goto :menu
