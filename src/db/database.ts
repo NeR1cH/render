@@ -60,6 +60,11 @@ try {
 } catch {
 }
 
+try {
+  db.exec('ALTER TABLE animelib_sync ADD COLUMN is_subscribed INTEGER DEFAULT 0');
+} catch {
+}
+
 db.exec('CREATE TABLE IF NOT EXISTS user_preferences (' +
   'user_id TEXT PRIMARY KEY, ' +
   'favorite_voiceovers TEXT DEFAULT "[]", ' +
@@ -151,6 +156,7 @@ export interface AnimeLibSyncRecord {
   shiki_id?: number;
   shiki_synced: number;
   custom_note?: string;
+  is_subscribed?: number;
   last_checked_at?: number;
 }
 
@@ -254,8 +260,8 @@ export const dbService = {
   },
 
   upsertSyncItem(item: Partial<AnimeLibSyncRecord> & { media_id: number; title: string }) {
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
@@ -266,6 +272,7 @@ export const dbService = {
       'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
       'custom_note = COALESCE(excluded.custom_note, animelib_sync.custom_note), ' +
+      'is_subscribed = COALESCE(excluded.is_subscribed, animelib_sync.is_subscribed), ' +
       'last_checked_at = excluded.last_checked_at';
     const stmt = db.prepare(query);
     stmt.run(
@@ -279,14 +286,15 @@ export const dbService = {
       item.shiki_id || null,
       item.shiki_synced || 0,
       item.custom_note || null,
+      item.is_subscribed !== undefined ? item.is_subscribed : 0,
       Date.now()
     );
   },
 
   batchUpsertSyncItems(items: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }>) {
     if (!items || items.length === 0) return;
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
@@ -297,6 +305,7 @@ export const dbService = {
       'shiki_id = COALESCE(excluded.shiki_id, animelib_sync.shiki_id), ' +
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
       'custom_note = COALESCE(excluded.custom_note, animelib_sync.custom_note), ' +
+      'is_subscribed = COALESCE(excluded.is_subscribed, animelib_sync.is_subscribed), ' +
       'last_checked_at = excluded.last_checked_at';
 
     this.transaction(() => {
@@ -314,6 +323,7 @@ export const dbService = {
           item.shiki_id || null,
           item.shiki_synced || 0,
           item.custom_note || null,
+          item.is_subscribed !== undefined ? item.is_subscribed : 0,
           now
         );
       }

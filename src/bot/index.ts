@@ -809,60 +809,69 @@ export async function showWatchingList(ctx: Context) {
 export async function showPlannedList(ctx: Context) {
   await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное» (AnimeLib)...</i>', { parse_mode: 'HTML' });
 
-  let plannedResult: { active: any[]; totalPlanned: number } = { active: [], totalPlanned: 0 };
+  let plannedResult: { active: any[]; all?: any[]; totalPlanned: number } = { active: [], totalPlanned: 0 };
   try {
     plannedResult = await animelibService.getAllPlanned();
   } catch (err: any) {
     console.warn('[AnimeLib] Error fetching paginated planned titles:', err?.message);
   }
 
-  let activeList = plannedResult.active;
-  let totalCount = plannedResult.totalPlanned;
+  let plannedItems = (plannedResult.all && plannedResult.all.length > 0)
+    ? plannedResult.all
+    : plannedResult.active;
 
-  if (activeList.length === 0) {
+  if (plannedItems.length === 0) {
     const plannedDb = dbService.getAllSyncItems('planned');
     if (plannedDb && plannedDb.length > 0) {
-      activeList = plannedDb.map((p) => ({
+      plannedItems = plannedDb.map((p) => ({
         media_id: p.media_id,
         slug_url: String(p.media_id),
         name: p.title,
         rus_name: p.rus_title,
         current_progress_number: p.last_tracked_episode,
         last_item_number: p.latest_episode,
+        is_subscribed: Boolean(p.is_subscribed),
+        has_notifications: Boolean(p.is_subscribed),
+        notify: Boolean(p.is_subscribed),
+        subscription: Boolean(p.is_subscribed),
+        notice: Boolean(p.is_subscribed),
       }));
-      totalCount = plannedDb.length;
     }
   }
 
-  if (activeList.length === 0) {
+  // Строгий фильтр по признаку активности уведомлений (колокольчик)
+  const bellItems = plannedItems.filter((item) =>
+    Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice)
+  );
+
+  if (bellItems.length === 0) {
     const emptyKb = new InlineKeyboard()
       .text('📋 Список «Смотрю»', 'list_watching')
       .text('🎲 Случайное', 'random_planned')
       .row()
       .text('❌ Закрыть меню', 'close_menu');
 
-    return ctx.reply('📭 В списке <b>«Запланированное»</b> нет актуальных ожидаемых релизов.', {
+    return ctx.reply('📭 В списке <b>«Запланированное»</b> нет тайтлов с активными уведомлениями (колокольчик 🔔).', {
       parse_mode: 'HTML',
       reply_markup: emptyKb,
     });
   }
 
-  const lines = activeList.slice(0, 15).map((item, idx) => {
+  const lines = bellItems.slice(0, 15).map((item, idx) => {
     const title = escapeHtml(item.rus_name || item.name);
-    const bell = item.is_subscribed ? ' 🔔' : '';
     const latest = item.last_item_number && item.last_item_number > 0
       ? ` (вышло: <code>#${item.last_item_number}</code>)`
       : ' <i>(анонс)</i>';
-    return `${idx + 1}. <b>${title}</b>${bell}${latest}`;
+    return `${idx + 1}. <b>${title}</b> 🔔${latest}`;
   });
 
   const totalText = [
-    `⏳ <b>Список «Запланированное»</b> [Ожидается: ${activeList.length} из ${totalCount} в планах]`,
+    `🔔 <b>Запланированное с уведомлениями [${bellItems.length} тайтлов]</b>`,
     '━━━━━━━━━━━━━━━━━━━━',
-    '<i>Тайтлы, ожидающие просмотра или выхода новых серий (статус «анонс» / «онгоинг» или включён колокольчик 🔔):</i>',
+    '<i>Тайтлы из ваших планов с активным колокольчиком уведомлений на AnimeLib:</i>',
     '',
     lines.join('\n\n'),
-    activeList.length > 15 ? `\n<i>...и ещё ${activeList.length - 15} активных тайтлов</i>` : '',
+    bellItems.length > 15 ? `\n<i>...и ещё ${bellItems.length - 15} тайтлов с уведомлениями</i>` : '',
     '',
     '<i>Выберите действие:</i>',
   ].join('\n');
