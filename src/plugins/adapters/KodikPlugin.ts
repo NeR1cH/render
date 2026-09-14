@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { BaseSourcePlugin } from '../BaseSourcePlugin.js';
 import { EpisodeQuery, StreamResult } from '../types.js';
+import { animelibService } from '../../services/animelib.js';
 
 interface RawEpisodePlayer {
   id?: number;
@@ -16,15 +17,16 @@ export class KodikPlugin extends BaseSourcePlugin {
   readonly name = 'Kodik External Player';
   readonly priority = 50;
 
-  private readonly apiBase = 'https://api.lib.social/api';
+  private readonly apiBases = [
+    process.env.ANIMELIB_API_URL,
+    'https://hapi.hentaicdn.org/api',
+    'https://anmli.org/api',
+    'https://api.lib.social/api',
+  ].filter(Boolean) as string[];
 
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
     const kodikUrls = await this.findKodikPlayerUrls(mediaId, episode);
-
-    if (kodikUrls.length === 0) {
-      return [];
-    }
 
     const results: StreamResult[] = [];
 
@@ -38,6 +40,26 @@ export class KodikPlugin extends BaseSourcePlugin {
       }
     }
 
+    // Если прямое извлечение не вернуло результат, пробуем разрешить через animelibService.resolveKodikStream
+    if (results.length === 0 && kodikUrls.length > 0) {
+      for (const item of kodikUrls) {
+        try {
+          const resolved = await animelibService.resolveKodikStream(item.url);
+          if (resolved && resolved.url) {
+            results.push({
+              url: resolved.url,
+              quality: this.normalizeQuality(resolved.quality),
+              format: (resolved.format as any) || this.detectFormat(resolved.url),
+              headers: resolved.headers || this.buildHeaders(item.url, 'https://kodikplayer.com'),
+              voiceover: item.voiceover || voiceover || 'Kodik',
+              source: this.id,
+            });
+            break;
+          }
+        } catch {}
+      }
+    }
+
     return results;
   }
 
@@ -45,54 +67,85 @@ export class KodikPlugin extends BaseSourcePlugin {
     mediaId: number,
     episode: number
   ): Promise<Array<{ url: string; voiceover?: string }>> {
-    try {
-      console.log(`[KodikPlugin] Запрос серий для mediaId: ${mediaId}...`);
-      const epUrl = `${this.apiBase}/anime/${mediaId}/episodes`;
-      const res = await axios.get<any>(epUrl, {
-        headers: this.buildHeaders('https://animelib.org/'),
-        timeout: 7000,
-      });
+    console.log(`[KodikPlugin] Запрос серий для mediaId: ${mediaId}...`);
 
-      const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
-      console.log(
-        `[KodikPlugin] Найдено серий в API: ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
-      );
-
-      const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
-      if (!targetEp) {
-        console.warn(`[KodikPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
-        return [];
-      }
-
-      const epPlayersUrl = `${this.apiBase}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-      const playersRes = await axios.get<any>(epPlayersUrl, {
-        headers: this.buildHeaders('https://animelib.org/'),
-        timeout: 7000,
-      });
-
-      const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
-      const list: Array<{ url: string; voiceover?: string }> = [];
-
-      for (const pl of players) {
-        const playerType = String(pl.player || '').toLowerCase();
-        let src = typeof pl.src === 'string' ? pl.src : pl.video?.src || pl.video?.href;
-
-        if (src && (playerType.includes('kodik') || src.includes('kodik') || src.includes('aniqit'))) {
-          if (src.startsWith('//')) {
-            src = `https:${src}`;
-          } else if (src.startsWith('/')) {
-            src = `https://kodikplayer.com${src}`;
-          }
-          const v = pl.translation?.title || pl.team?.name || 'Kodik';
-          list.push({ url: src, voiceover: v });
+    for (const base of this.apiBases) {
+      try {
+        const epUrl = `${base}/anime/${mediaId}/episodes`;
+        let res: any;
+        try {
+          res = await axios.get<any>(epUrl, {
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
+        } catch {
+          res = await axios.get<any>(`${base}/episodes`, {
+            params: { anime_id: mediaId },
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
         }
-      }
 
-      return list;
-    } catch (err: any) {
-      console.warn(`[KodikPlugin] Ошибка при запросе эпизодов:`, err?.response?.status, err?.message);
-      return [];
+        const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+        console.log(
+          `[KodikPlugin] Найдено серий в API (${base}): ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
+        );
+
+        const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
+        if (!targetEp) {
+          console.warn(`[KodikPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
+          return [];
+        }
+
+        let players: any[] = Array.isArray(targetEp.players) ? targetEp.players : [];
+
+        if (players.length === 0) {
+          const epPlayersUrl = `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`;
+          try {
+            const playersRes = await axios.get<any>(epPlayersUrl, {
+              headers: this.buildHeaders('https://animelib.org/'),
+              timeout: 5000,
+            });
+            players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
+          } catch {}
+        }
+
+        if (players.length === 0) {
+          try {
+            const epDetailRes = await axios.get<any>(`${base}/episodes/${targetEp.id}`, {
+              headers: this.buildHeaders('https://animelib.org/'),
+              timeout: 5000,
+            });
+            players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
+          } catch {}
+        }
+
+        const list: Array<{ url: string; voiceover?: string }> = [];
+
+        for (const pl of players) {
+          const playerType = String(pl.player || '').toLowerCase();
+          let src = typeof pl.src === 'string' ? pl.src : pl.video?.src || pl.video?.href;
+
+          if (src && (playerType.includes('kodik') || src.includes('kodik') || src.includes('aniqit'))) {
+            if (src.startsWith('//')) {
+              src = `https:${src}`;
+            } else if (src.startsWith('/')) {
+              src = `https://kodikplayer.com${src}`;
+            }
+            const v = pl.translation?.title || pl.team?.name || 'Kodik';
+            list.push({ url: src, voiceover: v });
+          }
+        }
+
+        if (list.length > 0) {
+          return list;
+        }
+      } catch (err: any) {
+        console.warn(`[KodikPlugin] Ошибка при запросе эпизодов через ${base}:`, err?.code || err?.response?.status || err?.message);
+      }
     }
+
+    return [];
   }
 
   private async resolveKodikManifest(kodikUrl: string, voiceover?: string): Promise<StreamResult | null> {

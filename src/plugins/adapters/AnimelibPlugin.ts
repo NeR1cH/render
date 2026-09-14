@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { BaseSourcePlugin } from '../BaseSourcePlugin.js';
 import { EpisodeQuery, StreamQuality, StreamResult } from '../types.js';
+import { animelibService, isNativeStreamPlayer } from '../../services/animelib.js';
 
 interface RawQualityItem {
   resolution?: number | string;
@@ -38,47 +39,70 @@ export class AnimelibPlugin extends BaseSourcePlugin {
   readonly name = 'AnimeLib Native HAPI v2';
   readonly priority = 100;
 
-  private readonly apiBase = 'https://api.lib.social/api';
+  private readonly apiBases = [
+    process.env.ANIMELIB_API_URL,
+    'https://hapi.hentaicdn.org/api',
+    'https://anmli.org/api',
+    'https://api.lib.social/api',
+  ].filter(Boolean) as string[];
+
   private readonly defaultMirrorHost = 'cache.lib.social';
 
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
     const rawPlayers = await this.fetchEpisodePlayers(mediaId, episode);
 
-    if (!rawPlayers || rawPlayers.length === 0) {
-      return [];
-    }
-
     const results: StreamResult[] = [];
 
-    // Фильтрация и сортировка плееров
-    const sortedPlayers = this.sortPlayersByVoiceover(rawPlayers, voiceover);
+    if (rawPlayers && rawPlayers.length > 0) {
+      // Фильтрация и сортировка плееров
+      const sortedPlayers = this.sortPlayersByVoiceover(rawPlayers, voiceover);
 
-    for (const player of sortedPlayers) {
-      // Игнорируем Kodik плееры в этом плагине — для них есть KodikPlugin
-      const playerType = String(player.player || '').toLowerCase();
-      if (playerType.includes('kodik')) {
-        continue;
-      }
+      for (const player of sortedPlayers) {
+        // Игнорируем Kodik плееры в этом плагине — для них есть KodikPlugin
+        const playerType = String(player.player || '').toLowerCase();
+        if (playerType.includes('kodik')) {
+          continue;
+        }
 
-      const voiceoverName =
-        player.translation?.title || player.team?.name || player.player || 'Оригинал / AnimeLib';
+        const voiceoverName =
+          player.translation?.title || player.team?.name || player.player || 'Оригинал / AnimeLib';
 
-      const streams = this.extractStreamsFromPlayer(player, voiceoverName);
-      for (const stream of streams) {
-        // Проверяем живой ли стрим, не отбрасывая доверенные ноды
-        const isAlive = await this.isStreamLikelyAlive(stream.url, stream.headers);
-        if (isAlive) {
-          results.push(stream);
+        const streams = this.extractStreamsFromPlayer(player, voiceoverName);
+        for (const stream of streams) {
+          // Проверяем живой ли стрим, не отбрасывая доверенные ноды
+          const isAlive = await this.isStreamLikelyAlive(stream.url, stream.headers);
+          if (isAlive) {
+            results.push(stream);
+          }
+        }
+
+        // Если нашли качественные стримы для подходящей озвучки, возвращаем их
+        if (results.length > 0 && voiceover) {
+          const matchesVoiceover = voiceoverName.toLowerCase().includes(voiceover.toLowerCase());
+          if (matchesVoiceover) {
+            break;
+          }
         }
       }
+    }
 
-      // Если нашли качественные стримы для подходящей озвучки, возвращаем их
-      if (results.length > 0 && voiceover) {
-        const matchesVoiceover = voiceoverName.toLowerCase().includes(voiceover.toLowerCase());
-        if (matchesVoiceover) {
-          break;
+    // Если прямое извлечение не вернуло стримов, используем проверенный движок animelibService
+    if (results.length === 0) {
+      try {
+        const direct = await animelibService.getDirectVideoLink(mediaId, episode, voiceover);
+        if (direct && direct.url) {
+          results.push({
+            url: direct.url,
+            quality: this.normalizeQuality(direct.quality),
+            format: (direct.format as any) || this.detectFormat(direct.url),
+            headers: direct.headers || this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+            voiceover: direct.voiceover || voiceover || 'AnimeLib',
+            source: this.id,
+          });
         }
+      } catch (svcErr: any) {
+        console.warn(`[AnimelibPlugin] Fallback getDirectVideoLink failed:`, svcErr?.message);
       }
     }
 
@@ -86,38 +110,69 @@ export class AnimelibPlugin extends BaseSourcePlugin {
   }
 
   private async fetchEpisodePlayers(mediaId: number, episode: number): Promise<RawPlayerPayload[]> {
-    try {
-      console.log(`[AnimelibPlugin] Запрос серий для mediaId: ${mediaId}...`);
-      const url = `${this.apiBase}/anime/${mediaId}/episodes`;
-      const res = await axios.get<any>(url, {
-        headers: this.buildHeaders('https://animelib.org/'),
-        timeout: 7000,
-      });
+    console.log(`[AnimelibPlugin] Запрос серий для mediaId: ${mediaId}...`);
 
-      const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
-      console.log(
-        `[AnimelibPlugin] Найдено серий в API: ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
-      );
+    for (const base of this.apiBases) {
+      try {
+        const url = `${base}/anime/${mediaId}/episodes`;
+        let res: any;
+        try {
+          res = await axios.get<any>(url, {
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
+        } catch {
+          // Альтернативный эндпоинт query param
+          res = await axios.get<any>(`${base}/episodes`, {
+            params: { anime_id: mediaId },
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
+        }
 
-      const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
-      if (!targetEp) {
-        console.warn(`[AnimelibPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
+        const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+        console.log(
+          `[AnimelibPlugin] Найдено серий в API (${base}): ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
+        );
+
+        const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
+        if (!targetEp) {
+          console.warn(`[AnimelibPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
+          return [];
+        }
+
+        // Если у эпизода уже есть массив players
+        if (Array.isArray(targetEp.players) && targetEp.players.length > 0) {
+          return targetEp.players;
+        }
+
+        // Получаем плееры конкретного эпизода
+        const epPlayersUrl = `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`;
+        try {
+          const playersRes = await axios.get<any>(epPlayersUrl, {
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
+          const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
+          if (players.length > 0) return players;
+        } catch {}
+
+        try {
+          const epDetailRes = await axios.get<any>(`${base}/episodes/${targetEp.id}`, {
+            headers: this.buildHeaders('https://animelib.org/'),
+            timeout: 5000,
+          });
+          const players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
+          if (players.length > 0) return players;
+        } catch {}
+
         return [];
+      } catch (err: any) {
+        console.warn(`[AnimelibPlugin] Ошибка при запросе эпизодов через ${base}:`, err?.code || err?.response?.status || err?.message);
       }
-
-      // Получаем плееры конкретного эпизода
-      const epPlayersUrl = `${this.apiBase}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-      const playersRes = await axios.get<any>(epPlayersUrl, {
-        headers: this.buildHeaders('https://animelib.org/'),
-        timeout: 7000,
-      });
-
-      const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
-      return players;
-    } catch (err: any) {
-      console.warn(`[AnimelibPlugin] Ошибка при запросе эпизодов:`, err?.response?.status, err?.message);
-      return [];
     }
+
+    return [];
   }
 
   private sortPlayersByVoiceover(players: RawPlayerPayload[], preferredVoiceover?: string): RawPlayerPayload[] {
