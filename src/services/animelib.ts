@@ -95,7 +95,7 @@ export const QUALITY_KEYS = [
  */
 export function extractDirectStreamUrl(
   pl: any,
-  defaultHost: string = 'cache.lib.social'
+  defaultHost: string = 'video.cdnlibs.org'
 ): { url: string; quality?: string } | null {
   if (!pl || typeof pl !== 'object') return null;
 
@@ -106,10 +106,12 @@ export function extractDirectStreamUrl(
     (pl.video && typeof pl.video === 'object' && pl.video.host) ||
     (pl.src && typeof pl.src === 'object' && pl.src.host) ||
     defaultHost ||
-    'cache.lib.social';
+    'video.cdnlibs.org';
 
-  if (typeof host === 'string' && host.includes('video.animelib.me')) {
-    host = 'cache.lib.social';
+  if (typeof host === 'string') {
+    if (host.includes('video.animelib.me') || host.includes('cache.lib.social')) {
+      host = 'video.cdnlibs.org';
+    }
   }
 
   // 1. Прямая поддержка структуры AnimeLib API:
@@ -137,9 +139,9 @@ export function extractDirectStreamUrl(
       let itemHost =
         (typeof item === 'object' && (item.host || (item.data && item.data.host))) ||
         host ||
-        'cache.lib.social';
-      if (typeof itemHost === 'string' && itemHost.includes('video.animelib.me')) {
-        itemHost = 'cache.lib.social';
+        'video.cdnlibs.org';
+      if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('cache.lib.social'))) {
+        itemHost = 'video.cdnlibs.org';
       }
       const q = typeof item === 'object' && item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : '1080p');
 
@@ -152,8 +154,7 @@ export function extractDirectStreamUrl(
         return { url: `https://kodikplayer.com${trimmed}`, quality: q };
       }
 
-      // 2) Если хост не указан, используй рабочий живой CDN AnimeLib: cache.lib.social (или текущий рабочий хост клиента animelib.org)
-      // 3) Итоговая склейка: https://${host.replace(/^https?:\/\//, '')}${href}
+      // Если хост не указан, берем реальный рабочий CDN AnimeLib: video.cdnlibs.org / cdnlibs.org
       if (trimmed.startsWith('/')) {
         const cleanHost = String(itemHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const fullUrl = `https://${cleanHost}${trimmed}`;
@@ -195,9 +196,9 @@ export function extractDirectStreamUrl(
       }
 
       // Относительный путь манифеста с хостом (начинается с одного слэша /)
-      let h = currentHost || host || 'cache.lib.social';
-      if (typeof h === 'string' && h.includes('video.animelib.me')) {
-        h = 'cache.lib.social';
+      let h = currentHost || host || 'video.cdnlibs.org';
+      if (typeof h === 'string' && (h.includes('video.animelib.me') || h.includes('cache.lib.social'))) {
+        h = 'video.cdnlibs.org';
       }
 
       if (trimmed.startsWith('/')) {
@@ -226,9 +227,9 @@ export function extractDirectStreamUrl(
 
     // 2. Объект (глубокий перебор ключей в строгом порядке качества)
     if (typeof val === 'object' && !Array.isArray(val)) {
-      let objHost = val.host || (val.data && val.data.host) || currentHost || host || 'cache.lib.social';
-      if (typeof objHost === 'string' && objHost.includes('video.animelib.me')) {
-        objHost = 'cache.lib.social';
+      let objHost = val.host || (val.data && val.data.host) || currentHost || host || 'video.cdnlibs.org';
+      if (typeof objHost === 'string' && (objHost.includes('video.animelib.me') || objHost.includes('cache.lib.social'))) {
+        objHost = 'video.cdnlibs.org';
       }
 
       // 2a. Проверяем ключи quality или qualities
@@ -277,12 +278,12 @@ export function extractDirectStreamUrl(
       for (const item of sorted) {
         if (!item) continue;
         if (typeof item === 'string') {
-          const res = tryResolve(item, qualityHint, currentHost || host || 'cache.lib.social');
+          const res = tryResolve(item, qualityHint, currentHost || host || 'video.cdnlibs.org');
           if (res) return res;
         } else if (typeof item === 'object') {
-          let itemHost = item.host || (item.data && item.data.host) || currentHost || host || 'cache.lib.social';
-          if (typeof itemHost === 'string' && itemHost.includes('video.animelib.me')) {
-            itemHost = 'cache.lib.social';
+          let itemHost = item.host || (item.data && item.data.host) || currentHost || host || 'video.cdnlibs.org';
+          if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('cache.lib.social'))) {
+            itemHost = 'video.cdnlibs.org';
           }
           const q = item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : qualityHint);
           const candidate = item.href || item.url || item.src || item.file || item.link || item.stream || item.path;

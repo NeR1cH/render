@@ -806,8 +806,15 @@ export async function showWatchingList(ctx: Context) {
   await ctx.reply(totalText, { parse_mode: 'HTML', reply_markup: kb });
 }
 
-export async function showPlannedList(ctx: Context) {
-  await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное» (AnimeLib)...</i>', { parse_mode: 'HTML' });
+export async function showPlannedList(
+  ctx: Context,
+  page: number = 0,
+  filterBellOnly: boolean = false,
+  isEdit: boolean = false
+) {
+  if (!isEdit) {
+    await ctx.reply('⏳ <i>Загружаю тайтлы из списка «Запланированное» (AnimeLib)...</i>', { parse_mode: 'HTML' });
+  }
 
   let plannedResult: { active: any[]; all?: any[]; totalPlanned: number } = { active: [], totalPlanned: 0 };
   try {
@@ -839,51 +846,124 @@ export async function showPlannedList(ctx: Context) {
     }
   }
 
-  // Строгий фильтр по признаку активности уведомлений (колокольчик)
-  const bellItems = plannedItems.filter((item) =>
-    Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice)
-  );
-
-  if (bellItems.length === 0) {
+  if (plannedItems.length === 0) {
     const emptyKb = new InlineKeyboard()
       .text('📋 Список «Смотрю»', 'list_watching')
       .text('🎲 Случайное', 'random_planned')
       .row()
       .text('❌ Закрыть меню', 'close_menu');
 
-    return ctx.reply('📭 В списке <b>«Запланированное»</b> нет тайтлов с активными уведомлениями (колокольчик 🔔).', {
+    return ctx.reply('📭 В списке <b>«Запланированное»</b> пока нет сохранённых тайтлов.', {
       parse_mode: 'HTML',
       reply_markup: emptyKb,
     });
   }
 
-  const lines = bellItems.slice(0, 15).map((item, idx) => {
+  // Фильтр тайтлов с активным колокольчиком уведомлений
+  const bellItems = plannedItems.filter((item) =>
+    Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice)
+  );
+
+  // Выбираем список для отображения
+  let displayList: any[] = [];
+  if (filterBellOnly) {
+    displayList = bellItems;
+  } else {
+    // По умолчанию: сначала тайтлы с колокольчиком 🔔, затем с уже вышедшими сериями, затем анонсы
+    displayList = [...plannedItems].sort((a, b) => {
+      const aBell = Boolean(a.has_notifications || a.notify || a.subscription || a.is_subscribed || a.notice);
+      const bBell = Boolean(b.has_notifications || b.notify || b.subscription || b.is_subscribed || b.notice);
+      if (aBell && !bBell) return -1;
+      if (!aBell && bBell) return 1;
+
+      const aEp = a.last_item_number || 0;
+      const bEp = b.last_item_number || 0;
+      return bEp - aEp;
+    });
+  }
+
+  if (filterBellOnly && displayList.length === 0) {
+    const noBellKb = new InlineKeyboard()
+      .text(`📂 Показать все запланированные (${plannedItems.length})`, 'list_planned_all')
+      .row()
+      .text('📋 Список «Смотрю»', 'list_watching')
+      .text('❌ Закрыть', 'close_menu');
+
+    const msg =
+      '📭 В списке <b>«Запланированное»</b> нет тайтлов с активным колокольчиком 🔔.\n\n' +
+      '💡 <i>Включите колокольчик 🔔 на сайте AnimeLib, чтобы бот мгновенно оповещал вас о новых сериях!</i>';
+
+    if (isEdit && ctx.callbackQuery) {
+      try {
+        return await ctx.editMessageText(msg, { parse_mode: 'HTML', reply_markup: noBellKb });
+      } catch {}
+    }
+    return ctx.reply(msg, { parse_mode: 'HTML', reply_markup: noBellKb });
+  }
+
+  // Постраничная навигация (по 10 тайтлов на страницу)
+  const PAGE_SIZE = 10;
+  const totalPages = Math.max(1, Math.ceil(displayList.length / PAGE_SIZE));
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const pageItems = displayList.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+
+  const lines = pageItems.map((item, idx) => {
+    const globalIdx = safePage * PAGE_SIZE + idx + 1;
     const title = escapeHtml(item.rus_name || item.name);
+    const hasBell = Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice);
+    const bellBadge = hasBell ? ' 🔔' : '';
     const latest = item.last_item_number && item.last_item_number > 0
-      ? ` (вышло: <code>#${item.last_item_number}</code>)`
-      : ' <i>(анонс)</i>';
-    return `${idx + 1}. <b>${title}</b> 🔔${latest}`;
+      ? ` └ [Вышло серий: <code>#${item.last_item_number}</code>]`
+      : ' └ <i>(анонс / серий ещё нет)</i>';
+    return `${globalIdx}. <b>${title}</b>${bellBadge}\n${latest}`;
   });
 
+  const headerTitle = filterBellOnly
+    ? `🔔 <b>Запланированное с уведомлениями</b> [${displayList.length} из ${plannedItems.length}]`
+    : `⏳ <b>Список «Запланированное»</b> [${plannedItems.length} тайтлов]`;
+
   const totalText = [
-    `🔔 <b>Запланированное с уведомлениями [${bellItems.length} тайтлов]</b>`,
+    headerTitle,
     '━━━━━━━━━━━━━━━━━━━━',
-    '<i>Тайтлы из ваших планов с активным колокольчиком уведомлений на AnimeLib:</i>',
-    '',
     lines.join('\n\n'),
-    bellItems.length > 15 ? `\n<i>...и ещё ${bellItems.length - 15} тайтлов с уведомлениями</i>` : '',
     '',
-    '<i>Выберите действие:</i>',
+    `📄 <i>Страница ${safePage + 1} из ${totalPages}</i>`,
   ].join('\n');
 
-  const kb = new InlineKeyboard()
-    .text('📥 Скачать серию из списка', 'dl_back_titles')
+  const kb = new InlineKeyboard();
+
+  // Навигация по страницам
+  if (totalPages > 1) {
+    if (safePage > 0) {
+      kb.text('⬅️ Назад', `pl_p:${safePage - 1}:${filterBellOnly ? 1 : 0}`);
+    }
+    kb.text(`• ${safePage + 1}/${totalPages} •`, 'noop');
+    if (safePage < totalPages - 1) {
+      kb.text('Вперёд ➡️', `pl_p:${safePage + 1}:${filterBellOnly ? 1 : 0}`);
+    }
+    kb.row();
+  }
+
+  // Переключатель фильтра (Все / Только с колокольчиком)
+  if (filterBellOnly) {
+    kb.text(`📂 Показать все запланированные (${plannedItems.length})`, 'list_planned_all').row();
+  } else if (bellItems.length > 0) {
+    kb.text(`🔔 Только с колокольчиком (${bellItems.length})`, 'list_planned_bell').row();
+  }
+
+  kb.text('📥 Скачать серию из планов', 'dl_back_titles')
     .text('🎲 Случайное из планов', 'random_from_planned')
     .row()
     .text('📋 Мой список («Смотрю»)', 'list_watching')
     .text('🔍 Проверить обновления', 'check_updates')
     .row()
     .text('❌ Закрыть меню', 'close_menu');
+
+  if (isEdit && ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(totalText, { parse_mode: 'HTML', reply_markup: kb });
+    } catch {}
+  }
 
   await ctx.reply(totalText, { parse_mode: 'HTML', reply_markup: kb });
 }
@@ -1264,7 +1344,24 @@ bot.callbackQuery('list_watching', async (ctx) => {
 
 bot.callbackQuery('list_planned', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await showPlannedList(ctx);
+  await showPlannedList(ctx, 0, false, false);
+});
+
+bot.callbackQuery('list_planned_all', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Все запланированные тайтлы' });
+  await showPlannedList(ctx, 0, false, true);
+});
+
+bot.callbackQuery('list_planned_bell', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Только с колокольчиком' });
+  await showPlannedList(ctx, 0, true, true);
+});
+
+bot.callbackQuery(/^pl_p:(\d+):(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const page = parseInt(ctx.match[1], 10) || 0;
+  const bellOnly = ctx.match[2] === '1';
+  await showPlannedList(ctx, page, bellOnly, true);
 });
 
 bot.callbackQuery('close_menu', async (ctx) => {
