@@ -95,7 +95,7 @@ export const QUALITY_KEYS = [
  */
 export function extractDirectStreamUrl(
   pl: any,
-  defaultHost: string = 'video.cdnlibs.org'
+  defaultHost: string = 'cache.lib.social'
 ): { url: string; quality?: string } | null {
   if (!pl || typeof pl !== 'object') return null;
 
@@ -106,11 +106,11 @@ export function extractDirectStreamUrl(
     (pl.video && typeof pl.video === 'object' && pl.video.host) ||
     (pl.src && typeof pl.src === 'object' && pl.src.host) ||
     defaultHost ||
-    'video.cdnlibs.org';
+    'cache.lib.social';
 
   if (typeof host === 'string') {
-    if (host.includes('video.animelib.me') || host.includes('cache.lib.social')) {
-      host = 'video.cdnlibs.org';
+    if (host.includes('video.animelib.me') || host.includes('video.cdnlibs.org') || host.includes('cdnlibs.org')) {
+      host = 'cache.lib.social';
     }
   }
 
@@ -139,9 +139,9 @@ export function extractDirectStreamUrl(
       let itemHost =
         (typeof item === 'object' && (item.host || (item.data && item.data.host))) ||
         host ||
-        'video.cdnlibs.org';
-      if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('cache.lib.social'))) {
-        itemHost = 'video.cdnlibs.org';
+        'cache.lib.social';
+      if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('video.cdnlibs.org') || itemHost.includes('cdnlibs.org'))) {
+        itemHost = 'cache.lib.social';
       }
       const q = typeof item === 'object' && item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : '1080p');
 
@@ -154,7 +154,7 @@ export function extractDirectStreamUrl(
         return { url: `https://kodikplayer.com${trimmed}`, quality: q };
       }
 
-      // Если хост не указан, берем реальный рабочий CDN AnimeLib: video.cdnlibs.org / cdnlibs.org
+      // Если хост не указан, берем проверенное зеркало: cache.lib.social (или anmli.org)
       if (trimmed.startsWith('/')) {
         const cleanHost = String(itemHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
         const fullUrl = `https://${cleanHost}${trimmed}`;
@@ -196,9 +196,9 @@ export function extractDirectStreamUrl(
       }
 
       // Относительный путь манифеста с хостом (начинается с одного слэша /)
-      let h = currentHost || host || 'video.cdnlibs.org';
-      if (typeof h === 'string' && (h.includes('video.animelib.me') || h.includes('cache.lib.social'))) {
-        h = 'video.cdnlibs.org';
+      let h = currentHost || host || 'cache.lib.social';
+      if (typeof h === 'string' && (h.includes('video.animelib.me') || h.includes('video.cdnlibs.org') || h.includes('cdnlibs.org'))) {
+        h = 'cache.lib.social';
       }
 
       if (trimmed.startsWith('/')) {
@@ -227,9 +227,9 @@ export function extractDirectStreamUrl(
 
     // 2. Объект (глубокий перебор ключей в строгом порядке качества)
     if (typeof val === 'object' && !Array.isArray(val)) {
-      let objHost = val.host || (val.data && val.data.host) || currentHost || host || 'video.cdnlibs.org';
-      if (typeof objHost === 'string' && (objHost.includes('video.animelib.me') || objHost.includes('cache.lib.social'))) {
-        objHost = 'video.cdnlibs.org';
+      let objHost = val.host || (val.data && val.data.host) || currentHost || host || 'cache.lib.social';
+      if (typeof objHost === 'string' && (objHost.includes('video.animelib.me') || objHost.includes('video.cdnlibs.org') || objHost.includes('cdnlibs.org'))) {
+        objHost = 'cache.lib.social';
       }
 
       // 2a. Проверяем ключи quality или qualities
@@ -278,12 +278,12 @@ export function extractDirectStreamUrl(
       for (const item of sorted) {
         if (!item) continue;
         if (typeof item === 'string') {
-          const res = tryResolve(item, qualityHint, currentHost || host || 'video.cdnlibs.org');
+          const res = tryResolve(item, qualityHint, currentHost || host || 'cache.lib.social');
           if (res) return res;
         } else if (typeof item === 'object') {
-          let itemHost = item.host || (item.data && item.data.host) || currentHost || host || 'video.cdnlibs.org';
-          if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('cache.lib.social'))) {
-            itemHost = 'video.cdnlibs.org';
+          let itemHost = item.host || (item.data && item.data.host) || currentHost || host || 'cache.lib.social';
+          if (typeof itemHost === 'string' && (itemHost.includes('video.animelib.me') || itemHost.includes('video.cdnlibs.org') || itemHost.includes('cdnlibs.org'))) {
+            itemHost = 'cache.lib.social';
           }
           const q = item.resolution ? `${item.resolution}p` : (item.quality ? `${item.quality}` : qualityHint);
           const candidate = item.href || item.url || item.src || item.file || item.link || item.stream || item.path;
@@ -1849,7 +1849,7 @@ export class AnimeLibService {
               'Range': 'bytes=0-2048',
               ...(reqHeaders || {}),
             },
-            timeout: 5000,
+            timeout: 2500,
             responseType: 'stream',
             validateStatus: (status) => status >= 200 && status < 400,
           });
@@ -1871,7 +1871,18 @@ export class AnimeLibService {
           const res = await testAndResolvePlayer(player);
           if (res && isValidVideoUrl(res.url)) {
             // Проверяем доступность нативного потока (защита от DNS ENOTFOUND / 404)
-            const isReachable = await verifyStreamReachable(res.url, res.headers);
+            let isReachable = await verifyStreamReachable(res.url, res.headers);
+
+            // Если зеркало cache.lib.social недоступно, пробуем альтернативное зеркало anmli.org
+            if (!isReachable && res.url.includes('cache.lib.social')) {
+              const altMirrorUrl = res.url.replace('cache.lib.social', 'anmli.org');
+              const altReachable = await verifyStreamReachable(altMirrorUrl, res.headers);
+              if (altReachable) {
+                res.url = altMirrorUrl;
+                isReachable = true;
+              }
+            }
+
             if (isReachable) {
               console.log(
                 `[AnimeLib] ✅ Успешно выбран нативный плеер AnimeLib #${player.id} (${res.quality}, ${res.voiceover || 'Без студии'})`
@@ -1879,7 +1890,7 @@ export class AnimeLibService {
               return res;
             } else {
               console.warn(
-                `[AnimeLib] Нативный плеер #${player.id} вернул недоступный поток (${res.url}). Переходим к проверке следующих вариантов или резервного Kodik...`
+                `[AnimeLib] Нативный плеер #${player.id} вернул недоступный поток (${res.url}). Мгновенно переключаемся к Kodik...`
               );
             }
           }
