@@ -47,24 +47,24 @@ export class KodikPlugin extends BaseSourcePlugin {
   ): Promise<Array<{ url: string; voiceover?: string }>> {
     try {
       const epUrl = `${this.apiBase}/anime/${mediaId}/episodes`;
-      const res = await axios.get<{ data?: Array<{ id: number; number: number | string }> }>(epUrl, {
+      const res = await axios.get<any>(epUrl, {
         headers: this.buildHeaders('https://animelib.org/'),
         timeout: 7000,
       });
 
-      const epList = res.data?.data || [];
-      const targetEp = epList.find((e) => Number(e.number) === episode);
+      const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
       if (!targetEp) {
         return [];
       }
 
       const epPlayersUrl = `${this.apiBase}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-      const playersRes = await axios.get<{ data?: RawEpisodePlayer[] }>(epPlayersUrl, {
+      const playersRes = await axios.get<any>(epPlayersUrl, {
         headers: this.buildHeaders('https://animelib.org/'),
         timeout: 7000,
       });
 
-      const players = playersRes.data?.data || [];
+      const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
       const list: Array<{ url: string; voiceover?: string }> = [];
 
       for (const pl of players) {

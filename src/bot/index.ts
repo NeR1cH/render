@@ -689,7 +689,7 @@ bot.command(['start', 'menu', 'help'], async (ctx) => {
 bot.command('check', (ctx) => checkAnimeUpdates(ctx, true));
 bot.command('download', (ctx) => showDownloadTitleSelection(ctx));
 bot.command('watching', (ctx) => showWatchingList(ctx));
-bot.command('planned', (ctx) => showPlannedList(ctx));
+bot.command('planned', (ctx) => showPlannedList(ctx, 0, true));
 bot.command('stats', (ctx) => showLibraryStats(ctx));
 bot.command('profile', (ctx) => showLibraryStats(ctx));
 bot.command('settings', (ctx) => openSettingsMenu(ctx));
@@ -702,7 +702,7 @@ bot.hears('📥 Скачать серию', (ctx) => showDownloadTitleSelection(
 bot.hears('📥 Скачать', (ctx) => showDownloadTitleSelection(ctx));
 bot.hears('📋 Мой список («Смотрю»)', (ctx) => showWatchingList(ctx));
 bot.hears('📺 Мой список', (ctx) => showWatchingList(ctx));
-bot.hears('⏳ Запланированное', (ctx) => showPlannedList(ctx));
+bot.hears('⏳ Запланированное', (ctx) => showPlannedList(ctx, 0, true));
 bot.hears('📊 Статистика медиатеки', (ctx) => showLibraryStats(ctx));
 bot.hears('👤 Профиль', (ctx) => showLibraryStats(ctx));
 bot.hears('⚙️ Настройки и озвучки', (ctx) => openSettingsMenu(ctx));
@@ -812,7 +812,7 @@ export async function showWatchingList(ctx: Context) {
 export async function showPlannedList(
   ctx: Context,
   page: number = 0,
-  filterBellOnly: boolean = false,
+  filterBellOnly: boolean = true,
   isEdit: boolean = false
 ) {
   if (!isEdit) {
@@ -862,20 +862,26 @@ export async function showPlannedList(
     });
   }
 
-  // Фильтр тайтлов с активным колокольчиком уведомлений
-  const bellItems = plannedItems.filter((item) =>
-    Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice)
-  );
+  // Фильтр тайтлов с активным колокольчиком уведомлений (с проверкой флагов и БД)
+  const hasBellNotification = (item: any): boolean => {
+    if (Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice)) {
+      return true;
+    }
+    const dbRecord = dbService.getSyncItemByMediaId(item.media_id);
+    return Boolean(dbRecord?.is_subscribed);
+  };
 
-  // Выбираем список для отображения
+  const bellItems = plannedItems.filter((item) => hasBellNotification(item));
+
+  // Выбираем список для отображения: по умолчанию ТОЛЬКО подписанные тайтлы с колокольчиком
   let displayList: any[] = [];
   if (filterBellOnly) {
     displayList = bellItems;
   } else {
     // По умолчанию: сначала тайтлы с колокольчиком 🔔, затем с уже вышедшими сериями, затем анонсы
     displayList = [...plannedItems].sort((a, b) => {
-      const aBell = Boolean(a.has_notifications || a.notify || a.subscription || a.is_subscribed || a.notice);
-      const bBell = Boolean(b.has_notifications || b.notify || b.subscription || b.is_subscribed || b.notice);
+      const aBell = hasBellNotification(a);
+      const bBell = hasBellNotification(b);
       if (aBell && !bBell) return -1;
       if (!aBell && bBell) return 1;
 
@@ -1347,7 +1353,7 @@ bot.callbackQuery('list_watching', async (ctx) => {
 
 bot.callbackQuery('list_planned', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await showPlannedList(ctx, 0, false, false);
+  await showPlannedList(ctx, 0, true, false);
 });
 
 bot.callbackQuery('list_planned_all', async (ctx) => {

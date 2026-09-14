@@ -68,21 +68,22 @@ export abstract class BaseSourcePlugin implements ISourcePlugin {
   /**
    * Безопасная проверка доступности URL стрима.
    * КРИТИЧЕСКИ ВАЖНО:
-   * Не отбрасывает нативные видеоноды (.lib.social, .animelib.org, .anmli.org)
-   * при кодах 403 Forbidden или 416 Range Not Satisfiable, так как видеоноды
-   * блокируют внешние пинги без полных браузерных cookie, но отлично отдают контент
-   * при стандартном стриминге через axios stream / ffmpeg.
+   * Убирает ложное отбрасывание рабочих плееров. Если URL синтаксически валиден,
+   * содержит http/https и хост из доверенных доменов (.lib.social, .animelib, .anmli, kodik, cdn),
+   * ВСЕГДА возвращает true, не делая блокирующих сетевых GET-запросов, которые срезаются Cloudflare/WAF.
    */
   protected async isStreamLikelyAlive(url: string, headers?: Record<string, string>): Promise<boolean> {
-    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+    if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) {
       return false;
     }
 
     const lowerUrl = url.toLowerCase();
 
-    // Доверенные CDN ноды AnimeLib и зеркала
-    const trustedHosts = ['lib.social', 'animelib.org', 'anmli.org', 'kodik', 'aniqit.com'];
-    const isTrustedHost = trustedHosts.some((h) => lowerUrl.includes(h));
+    // Доверенные CDN ноды AnimeLib, Kodik и зеркала (.lib.social, .animelib, .anmli, kodik, cdn)
+    const trustedHosts = ['.lib.social', '.animelib', '.anmli', 'kodik', 'cdn', 'aniqit'];
+    if (trustedHosts.some((h) => lowerUrl.includes(h))) {
+      return true;
+    }
 
     try {
       const config: AxiosRequestConfig = {
@@ -103,28 +104,8 @@ export abstract class BaseSourcePlugin implements ISourcePlugin {
         res.data.destroy();
       }
 
-      if (res.status >= 200 && res.status < 400) {
-        return true;
-      }
-
-      // Для доверенных хостов коды 403/416 при проверке не означают мертвый URL
-      if (isTrustedHost && (res.status === 403 || res.status === 416)) {
-        return true;
-      }
-
-      return false;
-    } catch (err: unknown) {
-      // При сетевой ошибке DNS ENOTFOUND хост действительно недоступен
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('ENOTFOUND') || errMsg.includes('ECONNREFUSED')) {
-        return false;
-      }
-
-      // Если хост доверенный и ошибка только по таймауту/блокировке пинга — не отбрасываем
-      if (isTrustedHost) {
-        return true;
-      }
-
+      return res.status >= 200 && res.status < 400;
+    } catch {
       return false;
     }
   }

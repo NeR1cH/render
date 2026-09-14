@@ -88,25 +88,26 @@ export class AnimelibPlugin extends BaseSourcePlugin {
   private async fetchEpisodePlayers(mediaId: number, episode: number): Promise<RawPlayerPayload[]> {
     try {
       const url = `${this.apiBase}/anime/${mediaId}/episodes`;
-      const res = await axios.get<{ data?: Array<{ id: number; number: number | string }> }>(url, {
+      const res = await axios.get<any>(url, {
         headers: this.buildHeaders('https://animelib.org/'),
         timeout: 7000,
       });
 
-      const epList = res.data?.data || [];
-      const targetEp = epList.find((e) => Number(e.number) === episode);
+      const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
       if (!targetEp) {
         return [];
       }
 
       // Получаем плееры конкретного эпизода
       const epPlayersUrl = `${this.apiBase}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-      const playersRes = await axios.get<{ data?: RawPlayerPayload[] }>(epPlayersUrl, {
+      const playersRes = await axios.get<any>(epPlayersUrl, {
         headers: this.buildHeaders('https://animelib.org/'),
         timeout: 7000,
       });
 
-      return playersRes.data?.data || [];
+      const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
+      return players;
     } catch {
       return [];
     }
