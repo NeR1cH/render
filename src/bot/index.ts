@@ -1559,13 +1559,19 @@ export async function queueAndStartDownload(
   const stored = dbService.getSyncItemByMediaId(mediaId);
   const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
 
+  const qDisplay = quality === '2160p' ? '4K 2160p' : (quality || '1080p Full HD');
+  const srcDisplay = sourceName === 'animelib'
+    ? 'AnimeLib Native'
+    : (sourceName === 'kodik' ? 'Kodik' : (sourceName || 'AnimeLib Native'));
+
   const text = [
     '📥 <b>Серия поставлена в очередь скачивания!</b>',
     '━━━━━━━━━━━━━━━━━━━━',
     `📺 <b>Тайтл:</b> ${escapeHtml(title)}`,
     `🎬 <b>Серия:</b> <code>#${episode}</code>`,
     `🎙 <b>Озвучка:</b> <code>${escapeHtml(voiceover || 'По умолчанию')}</code>`,
-    `💎 <b>Качество:</b> <code>${escapeHtml(quality || 'Auto')}</code> (<i>${escapeHtml(sourceName || 'AnimeLib')}</i>)`,
+    `📡 <b>Источник:</b> [${escapeHtml(srcDisplay)}]`,
+    `🎞 <b>Разрешение:</b> [${escapeHtml(qDisplay)}]`,
     '',
     '⏳ <i>Инициализация загрузки и обработка сегментов...</i>',
   ].join('\n');
@@ -1707,18 +1713,14 @@ export async function handleDownloadStreamSelection(
       (s.voiceover.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(s.voiceover.toLowerCase()))
     );
     const star = isPreferred ? '⭐️ ' : '';
-    const qText = s.quality || 'Auto';
-    const voText = s.voiceover || s.source || 'Native';
-    const rawLabel = `${star}[${qText}] ${voText}`;
-    const label = rawLabel.length > 28 ? `${rawLabel.slice(0, 27)}…` : rawLabel;
+    const qBadge = s.quality === '2160p' ? '4K' : (s.quality ? s.quality.replace('p', '') : 'Auto');
+    const srcBadge = s.source === 'animelib' ? 'AnimeLib' : (s.source === 'kodik' ? 'Kodik' : (s.source || 'Native'));
+    const voText = s.voiceover || 'Оригинал';
+    const rawLabel = `${star}🎬 [${qBadge}] ${srcBadge} • ${voText}`;
+    const label = rawLabel.length > 34 ? `${rawLabel.slice(0, 33)}…` : rawLabel;
 
     // callback_data ультракомпактный: dq:<mediaId>:<ep>:<index> (< 18 байт)
     kb.text(label, `dq:${mediaId}:${ep}:${i}`);
-    if (i % 2 === 1) {
-      kb.row();
-    }
-  }
-  if (streams.length % 2 !== 0) {
     kb.row();
   }
 

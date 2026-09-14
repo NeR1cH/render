@@ -46,7 +46,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
     'https://api.lib.social/api',
   ].filter(Boolean) as string[];
 
-  private readonly defaultMirrorHost = 'cache.lib.social';
+  private readonly defaultMirrorHost = 'video.animelib.me';
 
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
@@ -287,7 +287,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
     if (
       typeof host === 'string' &&
-      (host.includes('video.animelib.me') || host.includes('video.cdnlibs.org') || host.includes('cdnlibs.org'))
+      (host.includes('cache.lib.social') || host.includes('anmli.org'))
     ) {
       host = this.defaultMirrorHost;
     }

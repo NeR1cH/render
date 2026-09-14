@@ -171,7 +171,9 @@ export class DownloaderService {
   private async downloadTaskWithHttpStream(
     task: DownloadQueueRecord,
     videoUrl: string,
-    streamHeaders?: Record<string, string>
+    streamHeaders?: Record<string, string>,
+    streamSource?: string,
+    streamQuality?: string
   ): Promise<string> {
     this.ensureDownloadsDir();
 
@@ -188,6 +190,11 @@ export class DownloaderService {
 
     const effectiveHeaders = getEffectiveHeaders(videoUrl, streamHeaders);
 
+    const qDisplay = streamQuality === '2160p' ? '4K 2160p' : (streamQuality || '1080p Full HD');
+    const srcDisplay = streamSource === 'animelib'
+      ? 'AnimeLib Native'
+      : (streamSource === 'kodik' ? 'Kodik' : (streamSource || 'AnimeLib Native'));
+
     console.log(`[Downloader HTTP] Начинаю прямое скачивание задачи #${task.id}...`);
     console.log(`[Downloader HTTP] URL: ${videoUrl}`);
     console.log(`[Downloader HTTP] Целевой файл: ${relativeFilePath}`);
@@ -200,6 +207,8 @@ export class DownloaderService {
         `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
         `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
         `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+        `📡 <b>Источник:</b> [${escapeHtml(srcDisplay)}]`,
+        `🎞 <b>Разрешение:</b> [${escapeHtml(qDisplay)}]`,
         '',
         `<b>[${renderProgressBar(0)}] 0%</b>`,
         '⏳ <i>Установка прямого соединения со стрим-сервером...</i>',
@@ -353,7 +362,9 @@ export class DownloaderService {
   private async downloadTaskWithHls(
     task: DownloadQueueRecord,
     videoUrl: string,
-    streamHeaders?: Record<string, string>
+    streamHeaders?: Record<string, string>,
+    streamSource?: string,
+    streamQuality?: string
   ): Promise<string> {
     this.ensureDownloadsDir();
 
@@ -373,6 +384,11 @@ export class DownloaderService {
     );
 
     const effectiveHeaders = getEffectiveHeaders(videoUrl, streamHeaders);
+
+    const qDisplay = streamQuality === '2160p' ? '4K 2160p' : (streamQuality || '1080p Full HD');
+    const srcDisplay = streamSource === 'animelib'
+      ? 'AnimeLib Native'
+      : (streamSource === 'kodik' ? 'Kodik' : (streamSource || 'AnimeLib Native'));
 
     console.log(`[Downloader HLS] Начинаю нативный сборщик сегментов для задачи #${task.id}...`);
     console.log(`[Downloader HLS] Манифест: ${videoUrl}`);
@@ -459,6 +475,8 @@ export class DownloaderService {
           `📺 <b>Тайтл:</b> ${escapeHtml(animeTitle)}`,
           `🎬 <b>Серия:</b> <code>#${task.episode}</code>`,
           `🎙 <b>Озвучка:</b> <code>${escapeHtml(task.voiceover || 'По умолчанию')}</code>`,
+          `📡 <b>Источник:</b> [${escapeHtml(srcDisplay)}]`,
+          `🎞 <b>Разрешение:</b> [${escapeHtml(qDisplay)}]`,
           '',
           `<b>[${renderProgressBar(0)}] 0%</b>`,
           `⏳ <i>Загрузка HLS потока (всего сегментов: ${totalSegments})...</i>`,
@@ -667,9 +685,9 @@ export class DownloaderService {
           );
 
           if (stream.format === 'mp4') {
-            await this.downloadTaskWithHttpStream(task, stream.url, stream.headers);
+            await this.downloadTaskWithHttpStream(task, stream.url, stream.headers, stream.source, stream.quality);
           } else {
-            await this.downloadTaskWithHls(task, stream.url, stream.headers);
+            await this.downloadTaskWithHls(task, stream.url, stream.headers, stream.source, stream.quality);
           }
         } catch (taskErr: unknown) {
           const errMsg = taskErr instanceof Error ? taskErr.message : String(taskErr);
