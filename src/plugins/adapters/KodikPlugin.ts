@@ -46,6 +46,7 @@ export class KodikPlugin extends BaseSourcePlugin {
     episode: number
   ): Promise<Array<{ url: string; voiceover?: string }>> {
     try {
+      console.log(`[KodikPlugin] Запрос серий для mediaId: ${mediaId}...`);
       const epUrl = `${this.apiBase}/anime/${mediaId}/episodes`;
       const res = await axios.get<any>(epUrl, {
         headers: this.buildHeaders('https://animelib.org/'),
@@ -53,8 +54,13 @@ export class KodikPlugin extends BaseSourcePlugin {
       });
 
       const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      console.log(
+        `[KodikPlugin] Найдено серий в API: ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
+      );
+
       const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
       if (!targetEp) {
+        console.warn(`[KodikPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
         return [];
       }
 
@@ -83,7 +89,8 @@ export class KodikPlugin extends BaseSourcePlugin {
       }
 
       return list;
-    } catch {
+    } catch (err: any) {
+      console.warn(`[KodikPlugin] Ошибка при запросе эпизодов:`, err?.response?.status, err?.message);
       return [];
     }
   }

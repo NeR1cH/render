@@ -1605,6 +1605,39 @@ export async function handleDownloadStreamSelection(
   const title = stored?.rus_title || stored?.title || `Тайтл #${mediaId}`;
   const preferredVo = dbService.getPreferredVoiceover(mediaId) || stored?.preferred_voiceover;
 
+  // Проверяем реальное количество серий в API и БД перед запросом
+  let availableEps: number[] = [];
+  try {
+    availableEps = await animelibService.getAvailableEpisodes(mediaId);
+  } catch {}
+
+  const maxEp = availableEps.length > 0
+    ? availableEps[availableEps.length - 1]
+    : (stored?.latest_episode || 0);
+
+  if (maxEp > 0 && ep > maxEp) {
+    const notReleasedText = [
+      `📺 <b>${escapeHtml(title)}</b>`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      `⚠️ <b>Серия #${ep} еще не вышла или отсутствует в источнике.</b>`,
+      `📦 Максимальная доступная серия: <b>#${maxEp}</b>.`,
+      '',
+      '<i>Пожалуйста, выберите вышедшую серию из списка:</i>',
+    ].join('\n');
+
+    const kb = new InlineKeyboard()
+      .text('📺 К выбору серий', `dl_t:${mediaId}`)
+      .row()
+      .text('❌ Закрыть', 'close_menu');
+
+    try {
+      await ctx.editMessageText(notReleasedText, { parse_mode: 'HTML', reply_markup: kb });
+    } catch {
+      await ctx.reply(notReleasedText, { parse_mode: 'HTML', reply_markup: kb });
+    }
+    return;
+  }
+
   let streams: StreamResult[] = [];
   try {
     streams = await sourceRegistry.getAllStreams({
@@ -1623,6 +1656,7 @@ export async function handleDownloadStreamSelection(
       `📺 <b>${escapeHtml(title)}</b>`,
       '━━━━━━━━━━━━━━━━━━━━',
       `⚠️ <b>Видеопотоки для серии #${ep} не найдены</b>`,
+      ...(maxEp > 0 && ep > maxEp ? [`⚠️ <i>Серия #${ep} еще не вышла или отсутствует в источнике. Максимальная доступная серия: #${maxEp}.</i>`, ''] : []),
       '',
       '<i>Плееры AnimeLib и Kodik в данный момент не вернули рабочие стримы для этой серии. Попробуйте позже или выберите другую серию.</i>',
     ].join('\n');
@@ -1888,13 +1922,11 @@ export async function showEpisodeSelection(ctx: Context, mediaId: number) {
   const lastTracked = stored?.last_tracked_episode || 0;
 
   let episodes = await animelibService.getAvailableEpisodes(mediaId);
-  let latest = episodes.length > 0 ? episodes[episodes.length - 1] : (stored?.latest_episode || lastTracked || 0);
+  let latest = episodes.length > 0 ? episodes[episodes.length - 1] : (stored?.latest_episode || 0);
 
-  // Fallback: If no episodes were fetched from API, generate 1..max range
-  if (episodes.length === 0) {
-    const maxCount = Math.max(latest, lastTracked + 1, 12);
-    episodes = Array.from({ length: maxCount }, (_, i) => i + 1);
-    latest = episodes[episodes.length - 1];
+  // Если список серий пуст, проверяем локальную БД
+  if (episodes.length === 0 && latest > 0) {
+    episodes = Array.from({ length: latest }, (_, i) => i + 1);
   }
 
   const text = [

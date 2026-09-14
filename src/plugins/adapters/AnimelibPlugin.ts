@@ -87,6 +87,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
   private async fetchEpisodePlayers(mediaId: number, episode: number): Promise<RawPlayerPayload[]> {
     try {
+      console.log(`[AnimelibPlugin] Запрос серий для mediaId: ${mediaId}...`);
       const url = `${this.apiBase}/anime/${mediaId}/episodes`;
       const res = await axios.get<any>(url, {
         headers: this.buildHeaders('https://animelib.org/'),
@@ -94,8 +95,13 @@ export class AnimelibPlugin extends BaseSourcePlugin {
       });
 
       const epList = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      console.log(
+        `[AnimelibPlugin] Найдено серий в API: ${epList.length}. Доступные номера: ${epList.map((e: any) => e.number || e.item_number || e.episode).slice(0, 10).join(', ')}...`
+      );
+
       const targetEp = epList.find((e: any) => Number(e.number || e.item_number || e.episode) === Number(episode));
       if (!targetEp) {
+        console.warn(`[AnimelibPlugin] Серия #${episode} отсутствует в списке доступных серий тайтла ${mediaId}`);
         return [];
       }
 
@@ -108,7 +114,8 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
       const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
       return players;
-    } catch {
+    } catch (err: any) {
+      console.warn(`[AnimelibPlugin] Ошибка при запросе эпизодов:`, err?.response?.status, err?.message);
       return [];
     }
   }
