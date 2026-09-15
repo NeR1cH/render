@@ -22,16 +22,19 @@ Core principle: Do not optimize for cleverness. Optimize for clear reasoning, sm
 - Verify changes narrowly. Loop until verified.
 
 ## 5. Autonomous Self-Verification Protocol
-ПОСЛЕ КАЖДОГО ИЗМЕНЕНИЯ КОДА МОДЕЛЬ ОБЯЗАНА ПРОВОДИТЬ АВТОНОМНУЮ САМОПРОВЕРКУ:
-1. **Запуск статической проверки типов** (эквивалент `tsc --noEmit` / `lint_applet`) — ошибок должно быть строго 0.
-2. **Проверка лимитов Telegram**:
-   - Все `callback_data` строго < 64 байт.
-   - Каждый обработчик `bot.callbackQuery` содержит обязательный `await ctx.answerCallbackQuery()`.
-   - Все внешние и пользовательские строки обернуты в `escapeHtml()`.
-3. **Проверка сетевых контрактов и ресурсов**:
-   - Никаких мертвых доменов, предварительных блокирующих пингов или вызовов отсутствующих методов.
-   - Потоковая передача данных (`stream.pipeline`) для предотвращения Out-Of-Memory.
-4. **Предоставление в ответе краткого блока "Self-Verification Checklist" со статусом каждого пункта.**
+AFTER EVERY CODE CHANGE, THE MODEL IS REQUIRED TO EXECUTE AN AUTONOMOUS SELF-VERIFICATION:
+1. **Run Static Type Checking** (equivalent to `tsc --noEmit` / `lint_applet`) — strictly 0 errors required.
+2. **Verify Telegram Platform Limits**:
+   - All `callback_data` payloads must strictly be < 64 bytes.
+   - Every `bot.callbackQuery` handler must include a mandatory `await ctx.answerCallbackQuery()`.
+   - All external and user-supplied strings must be wrapped in `escapeHtml()`.
+3. **Verify Network Contracts and Resource Usage**:
+   - No dead domains, pre-flight blocking pings, or calls to non-existent methods.
+   - Streamed data processing (`stream.pipeline`) to prevent Out-Of-Memory errors.
+4. **Include a concise "Self-Verification Checklist" block in the final response** reporting the status of each item.
+
+## 6. Mandatory Documentation Protocol
+UPON ANY FEATURE ADDITION OR BUG FIX, THE MODEL MUST SIMULTANEOUSLY UPDATE `CHANGELOG.md` (adding an entry to the [Unreleased] section describing the changes) AND UPDATE SYNTAX / USAGE EXAMPLES IN `README.md` AS NECESSARY.
 
 ---
 
