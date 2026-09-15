@@ -1,7 +1,6 @@
 import axios from 'axios';
 import { BaseSourcePlugin } from '../BaseSourcePlugin.js';
 import { EpisodeQuery, StreamQuality, StreamResult } from '../types.js';
-import { animelibService, isNativeStreamPlayer } from '../../services/animelib.js';
 
 interface RawQualityItem {
   resolution?: number | string;
@@ -42,11 +41,9 @@ export class AnimelibPlugin extends BaseSourcePlugin {
   private readonly apiBases = [
     process.env.ANIMELIB_API_URL,
     'https://hapi.hentaicdn.org/api',
-    'https://anmli.org/api',
-    'https://api.lib.social/api',
   ].filter(Boolean) as string[];
 
-  private readonly defaultMirrorHost = 'video.animelib.me';
+  private readonly defaultApiHost = 'hapi.hentaicdn.org';
 
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
@@ -70,6 +67,8 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
         const streams = this.extractStreamsFromPlayer(player, voiceoverName);
         for (const stream of streams) {
+          // Логируем реальный сгенерированный URL стрима перед проверкой
+          console.log(`[AnimelibPlugin] Проверка нативного стрима (${stream.quality}, ${stream.voiceover}): ${stream.url}`);
           // Проверяем живой ли стрим, не отбрасывая доверенные ноды
           const isAlive = await this.isStreamLikelyAlive(stream.url, stream.headers);
           if (isAlive) {
@@ -84,25 +83,6 @@ export class AnimelibPlugin extends BaseSourcePlugin {
             break;
           }
         }
-      }
-    }
-
-    // Если прямое извлечение не вернуло стримов, используем проверенный движок animelibService
-    if (results.length === 0) {
-      try {
-        const direct = await animelibService.getDirectVideoLink(mediaId, episode, voiceover);
-        if (direct && direct.url) {
-          results.push({
-            url: direct.url,
-            quality: this.normalizeQuality(direct.quality),
-            format: (direct.format as any) || this.detectFormat(direct.url),
-            headers: direct.headers || this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
-            voiceover: direct.voiceover || voiceover || 'AnimeLib',
-            source: this.id,
-          });
-        }
-      } catch (svcErr: any) {
-        console.warn(`[AnimelibPlugin] Fallback getDirectVideoLink failed:`, svcErr?.message);
       }
     }
 
@@ -279,18 +259,11 @@ export class AnimelibPlugin extends BaseSourcePlugin {
   }
 
   private resolvePlayerHost(player: RawPlayerPayload): string {
-    let host =
+    const host =
       player.host ||
       player.video?.host ||
       (typeof player.src === 'object' && player.src?.host ? player.src.host : null) ||
-      this.defaultMirrorHost;
-
-    if (
-      typeof host === 'string' &&
-      (host.includes('cache.lib.social') || host.includes('anmli.org'))
-    ) {
-      host = this.defaultMirrorHost;
-    }
+      this.defaultApiHost;
 
     return String(host).replace(/^https?:\/\//, '').replace(/\/+$/, '');
   }
@@ -306,7 +279,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
       return `https:${trimmed}`;
     }
 
-    const cleanHost = (host || this.defaultMirrorHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const cleanHost = (host || this.defaultApiHost).replace(/^https?:\/\//, '').replace(/\/+$/, '');
     if (trimmed.startsWith('/')) {
       return `https://${cleanHost}${trimmed}`;
     }

@@ -1717,7 +1717,7 @@ export async function handleDownloadStreamSelection(
     const srcBadge = s.source === 'animelib' ? 'AnimeLib' : (s.source === 'kodik' ? 'Kodik' : (s.source || 'Native'));
     const voText = s.voiceover || 'Оригинал';
     const rawLabel = `${star}🎬 [${qBadge}] ${srcBadge} • ${voText}`;
-    const label = rawLabel.length > 34 ? `${rawLabel.slice(0, 33)}…` : rawLabel;
+    const label = rawLabel.length > 36 ? `${rawLabel.slice(0, 35)}…` : rawLabel;
 
     // callback_data ультракомпактный: dq:<mediaId>:<ep>:<index> (< 18 байт)
     kb.text(label, `dq:${mediaId}:${ep}:${i}`);
