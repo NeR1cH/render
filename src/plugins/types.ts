@@ -1,4 +1,4 @@
-export type StreamQuality = '360p' | '480p' | '720p' | '1080p' | '2160p' | 'auto';
+export type StreamQuality = '360p' | '480p' | '720p' | '1080p' | '1440p' | '2160p' | 'auto';
 
 export type StreamFormat = 'mp4' | 'm3u8';
 

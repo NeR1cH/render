@@ -259,7 +259,8 @@ export class DownloaderService {
       .replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, '_')
       .substring(0, 30);
 
-    const filename = `anime_${task.media_id}_ep_${task.episode}_${safeVoiceover}.mp4`;
+    const safeQuality = (streamQuality || '1080p').replace(/[^a-zA-Z0-9_-]/g, '');
+    const filename = `anime_${task.media_id}_ep_${task.episode}_${safeQuality}_${safeVoiceover}.mp4`;
     const relativeFilePath = path.join('downloads', filename);
     const absoluteFilePath = path.join(this.downloadsDir, filename);
 
@@ -450,7 +451,8 @@ export class DownloaderService {
       .replace(/[^a-zA-Z0-9а-яА-ЯёЁ_-]/g, '_')
       .substring(0, 30);
 
-    const filename = `anime_${task.media_id}_ep_${task.episode}_${safeVoiceover}.mp4`;
+    const safeQuality = (streamQuality || '1080p').replace(/[^a-zA-Z0-9_-]/g, '');
+    const filename = `anime_${task.media_id}_ep_${task.episode}_${safeQuality}_${safeVoiceover}.mp4`;
     const relativeFilePath = path.join('downloads', filename);
     const absoluteFilePath = path.join(this.downloadsDir, filename);
     const tempTsPath = path.join(

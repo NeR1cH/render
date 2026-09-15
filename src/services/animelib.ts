@@ -1568,14 +1568,14 @@ export class AnimeLibService {
       });
 
       const links = postRes.data?.links || {};
-      const qualities = ['1080', '720', '480', '360'];
+      const qualities = ['2160', '1440', '1080', '720', '480', '360'];
       let chosenRaw = '';
       let chosenQuality = '1080p';
 
       for (const q of qualities) {
         if (links[q] && Array.isArray(links[q]) && links[q][0]?.src) {
           chosenRaw = links[q][0].src;
-          chosenQuality = `${q}p`;
+          chosenQuality = q === '2160' ? '2160p' : (q === '1440' ? '1440p' : `${q}p`);
           break;
         }
       }

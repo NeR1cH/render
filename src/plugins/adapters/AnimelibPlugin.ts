@@ -243,18 +243,35 @@ export class AnimelibPlugin extends BaseSourcePlugin {
     if (singleSrc && list.length === 0) {
       const streamUrl = this.normalizeHref(singleSrc, baseHost);
       if (streamUrl) {
+        // Определяем качество из URL или метаданных плеера, иначе дефолт 1080p
+        const detectedQuality = this.normalizeQuality(
+          (player as any).resolution || (player as any).quality || (player.video as any)?.resolution || singleSrc
+        );
         list.push({
           url: streamUrl,
-          quality: '1080p',
+          quality: detectedQuality,
           format: this.detectFormat(streamUrl),
           headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
           voiceover,
           source: this.id,
         });
+
+        // Если это шаблонный URL вида ..._1080.mp4 или .../1080p.mp4, генерируем альтернативные качества при наличии флага
+        if (streamUrl.includes('_1080.mp4')) {
+          const url720 = streamUrl.replace('_1080.mp4', '_720.mp4');
+          list.push({
+            url: url720,
+            quality: '720p',
+            format: 'mp4',
+            headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+            voiceover,
+            source: this.id,
+          });
+        }
       }
     }
 
-    // Сортировка по качеству (2160p -> 1080p -> 720p -> 480p -> 360p)
+    // Сортировка по качеству (2160p -> 1440p -> 1080p -> 720p -> 480p -> 360p)
     return this.sortStreamsByQuality(list);
   }
 
@@ -289,7 +306,8 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
   private sortStreamsByQuality(streams: StreamResult[]): StreamResult[] {
     const weight: Record<StreamQuality, number> = {
-      '2160p': 5,
+      '2160p': 6,
+      '1440p': 5,
       '1080p': 4,
       '720p': 3,
       '480p': 2,

@@ -29,10 +29,11 @@ export abstract class BaseSourcePlugin implements ISourcePlugin {
   protected normalizeQuality(raw?: string | number | null): StreamQuality {
     if (!raw) return 'auto';
     const str = String(raw).toLowerCase().trim();
-    if (str.includes('2160') || str.includes('4k')) return '2160p';
-    if (str.includes('1080')) return '1080p';
-    if (str.includes('720')) return '720p';
-    if (str.includes('480')) return '480p';
+    if (str.includes('2160') || str.includes('4k') || str.includes('uhd')) return '2160p';
+    if (str.includes('1440') || str.includes('2k') || str.includes('qhd')) return '1440p';
+    if (str.includes('1080') || str.includes('fhd')) return '1080p';
+    if (str.includes('720') || str.includes('hd')) return '720p';
+    if (str.includes('480') || str.includes('sd')) return '480p';
     if (str.includes('360')) return '360p';
     return '1080p';
   }

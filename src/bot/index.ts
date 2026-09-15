@@ -1698,17 +1698,32 @@ export async function handleDownloadStreamSelection(
     return;
   }
 
-  // Если настроена любимая озвучка, поднимаем совпадающий стрим наверх
-  if (preferredVo && preferredVo.trim()) {
-    const norm = preferredVo.trim().toLowerCase();
-    streams.sort((a, b) => {
+  // Сортировка стримов:
+  // 1. Предпочитаемая озвучка (если совпадает)
+  // 2. Убывание качества (2160p 4K -> 1440p 2K -> 1080p -> 720p -> 480p -> 360p)
+  const qualityWeight: Record<string, number> = {
+    '2160p': 6,
+    '1440p': 5,
+    '1080p': 4,
+    '720p': 3,
+    '480p': 2,
+    '360p': 1,
+    'auto': 0,
+  };
+
+  streams.sort((a, b) => {
+    if (preferredVo && preferredVo.trim()) {
+      const norm = preferredVo.trim().toLowerCase();
       const aMatch = a.voiceover && (a.voiceover.toLowerCase().includes(norm) || norm.includes(a.voiceover.toLowerCase()));
       const bMatch = b.voiceover && (b.voiceover.toLowerCase().includes(norm) || norm.includes(b.voiceover.toLowerCase()));
       if (aMatch && !bMatch) return -1;
       if (!aMatch && bMatch) return 1;
-      return 0;
-    });
-  }
+    }
+
+    const wA = qualityWeight[a.quality] || 0;
+    const wB = qualityWeight[b.quality] || 0;
+    return wB - wA;
+  });
 
   // Сохраняем стримы в сессионный кэш для короткого callback_data (<64 байт)
   const key = `${mediaId}:${ep}`;
@@ -1723,11 +1738,11 @@ export async function handleDownloadStreamSelection(
       (s.voiceover.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(s.voiceover.toLowerCase()))
     );
     const badge = isPreferred ? '✅ ' : '';
-    const qBadge = s.quality === '2160p' ? '4K' : (s.quality ? s.quality.replace('p', '') : 'Auto');
+    const qBadge = s.quality === '2160p' ? '4K 2160p' : (s.quality === '1440p' ? '2K 1440p' : (s.quality || '1080p'));
     const srcBadge = s.source === 'animelib' ? 'AnimeLib' : (s.source === 'kodik' ? 'Kodik' : (s.source || 'Native'));
     const voText = s.voiceover || 'Оригинал';
     const rawLabel = `${badge}🎬 [${qBadge}] ${srcBadge} • ${voText}`;
-    const label = rawLabel.length > 36 ? `${rawLabel.slice(0, 35)}…` : rawLabel;
+    const label = rawLabel.length > 40 ? `${rawLabel.slice(0, 39)}…` : rawLabel;
 
     // callback_data ультракомпактный: dq:<mediaId>:<ep>:<index> (< 18 байт)
     kb.text(label, `dq:${mediaId}:${ep}:${i}`);
