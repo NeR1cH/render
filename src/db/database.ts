@@ -432,6 +432,32 @@ export const dbService = {
     stmt.run(Date.now(), mediaId);
   },
 
+  toggleSubscription(mediaId: number): boolean {
+    const existing = this.getSyncItemByMediaId(mediaId);
+    const currentSub = existing?.is_subscribed === 1;
+    const newSub = currentSub ? 0 : 1;
+    if (existing) {
+      const stmt = db.prepare('UPDATE animelib_sync SET is_subscribed = ?, last_checked_at = ? WHERE media_id = ?');
+      stmt.run(newSub, Date.now(), mediaId);
+    } else {
+      const stmt = db.prepare('INSERT INTO animelib_sync (media_id, title, is_subscribed, last_checked_at) VALUES (?, ?, ?, ?)');
+      stmt.run(mediaId, `Тайтл #${mediaId}`, newSub, Date.now());
+    }
+    return newSub === 1;
+  },
+
+  setSubscription(mediaId: number, isSubscribed: boolean): void {
+    const subVal = isSubscribed ? 1 : 0;
+    const existing = this.getSyncItemByMediaId(mediaId);
+    if (existing) {
+      const stmt = db.prepare('UPDATE animelib_sync SET is_subscribed = ?, last_checked_at = ? WHERE media_id = ?');
+      stmt.run(subVal, Date.now(), mediaId);
+    } else {
+      const stmt = db.prepare('INSERT INTO animelib_sync (media_id, title, is_subscribed, last_checked_at) VALUES (?, ?, ?, ?)');
+      stmt.run(mediaId, `Тайтл #${mediaId}`, subVal, Date.now());
+    }
+  },
+
   markShikiSynced(mediaId: number, shikiId: number, status?: string) {
     if (status) {
       const stmt = db.prepare('UPDATE animelib_sync SET shiki_id = ?, shiki_synced = 1, status = ? WHERE media_id = ?');

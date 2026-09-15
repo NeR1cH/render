@@ -21,6 +21,18 @@ Core principle: Do not optimize for cleverness. Optimize for clear reasoning, sm
 - Define clear success criteria before writing code.
 - Verify changes narrowly. Loop until verified.
 
+## 5. Autonomous Self-Verification Protocol
+ПОСЛЕ КАЖДОГО ИЗМЕНЕНИЯ КОДА МОДЕЛЬ ОБЯЗАНА ПРОВОДИТЬ АВТОНОМНУЮ САМОПРОВЕРКУ:
+1. **Запуск статической проверки типов** (эквивалент `tsc --noEmit` / `lint_applet`) — ошибок должно быть строго 0.
+2. **Проверка лимитов Telegram**:
+   - Все `callback_data` строго < 64 байт.
+   - Каждый обработчик `bot.callbackQuery` содержит обязательный `await ctx.answerCallbackQuery()`.
+   - Все внешние и пользовательские строки обернуты в `escapeHtml()`.
+3. **Проверка сетевых контрактов и ресурсов**:
+   - Никаких мертвых доменов, предварительных блокирующих пингов или вызовов отсутствующих методов.
+   - Потоковая передача данных (`stream.pipeline`) для предотвращения Out-Of-Memory.
+4. **Предоставление в ответе краткого блока "Self-Verification Checklist" со статусом каждого пункта.**
+
 ---
 
 # Project Specific Constraints (Anime Tracker)

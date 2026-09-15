@@ -174,6 +174,7 @@ export function buildAnimeCardKeyboard(item: {
   currentEpisode?: number;
   newEpisode?: number;
   quality?: string;
+  isSubscribed?: boolean;
 }): InlineKeyboard {
   const kb = new InlineKeyboard();
 
@@ -195,6 +196,13 @@ export function buildAnimeCardKeyboard(item: {
     kb.text(`👁 Отметить #${epToMark}`, `watch_${item.mediaId}_${epToMark}_${item.shikiId || 0}`);
     kb.row();
     kb.text('🎙 Настроить озвучку', `setup_vo:${item.mediaId}`);
+
+    // Колокольчик отслеживания: проверяем переданное значение или смотрим в SQLite
+    const isSubscribed = item.isSubscribed !== undefined
+      ? item.isSubscribed
+      : Boolean(dbService.getSyncItemByMediaId(item.mediaId)?.is_subscribed);
+    const bellLabel = isSubscribed ? '🔔 Отслеживается' : '🔕 Не отслеживать';
+    kb.text(bellLabel, `toggle_bell:${item.mediaId}`);
     kb.row();
   }
 
@@ -904,8 +912,8 @@ export async function showPlannedList(
       .text('❌ Закрыть', 'close_menu');
 
     const msg =
-      '📭 В списке <b>«Запланированное»</b> нет тайтлов с активным колокольчиком 🔔.\n\n' +
-      '💡 <i>Включите колокольчик 🔔 на сайте AnimeLib, чтобы бот мгновенно оповещал вас о новых сериях!</i>';
+      '🔔 В «Запланированном» пока нет тайтлов с активным колокольчиком.\n\n' +
+      '💡 Вы можете включить уведомления кнопкой [🔔 Отслеживать] в карточке тайтла или на сайте AnimeLib, чтобы бот мгновенно оповещал вас о выходе новых серий!';
 
     if (isEdit && ctx.callbackQuery) {
       try {
@@ -924,7 +932,7 @@ export async function showPlannedList(
   const lines = pageItems.map((item, idx) => {
     const globalIdx = safePage * PAGE_SIZE + idx + 1;
     const title = escapeHtml(item.rus_name || item.name);
-    const hasBell = Boolean(item.has_notifications || item.notify || item.subscription || item.is_subscribed || item.notice);
+    const hasBell = hasBellNotification(item);
     const bellBadge = hasBell ? ' 🔔' : '';
     const latest = item.last_item_number && item.last_item_number > 0
       ? ` └ [Вышло серий: <code>#${item.last_item_number}</code>]`
@@ -1424,6 +1432,39 @@ bot.callbackQuery('random_from_ongoing', async (ctx) => {
 bot.callbackQuery('open_settings', async (ctx) => {
   await ctx.answerCallbackQuery();
   await openSettingsMenu(ctx);
+});
+
+// Toggle bell / notifications for a title
+bot.callbackQuery(/^toggle_bell:(\d+)$/, async (ctx) => {
+  const mediaId = parseInt(ctx.match[1], 10);
+  const isSubscribed = dbService.toggleSubscription(mediaId);
+  const statusText = isSubscribed
+    ? '🔔 Уведомления включены! Бот пришлет новую серию.'
+    : '🔕 Уведомления отключены.';
+  await ctx.answerCallbackQuery({ text: statusText });
+
+  // Dynamically update button label in the current keyboard if possible
+  try {
+    const currentMarkup = ctx.callbackQuery.message?.reply_markup;
+    if (currentMarkup?.inline_keyboard) {
+      const updatedKeyboard = currentMarkup.inline_keyboard.map((row) =>
+        row.map((btn) => {
+          if ('callback_data' in btn && btn.callback_data === `toggle_bell:${mediaId}`) {
+            return {
+              ...btn,
+              text: isSubscribed ? '🔔 Отслеживается' : '🔕 Не отслеживать',
+            };
+          }
+          return btn;
+        })
+      );
+      await ctx.editMessageReplyMarkup({
+        reply_markup: { inline_keyboard: updatedKeyboard },
+      });
+    }
+  } catch (e: any) {
+    console.debug('[Telegram Bot] Could not update toggle_bell reply_markup:', e?.message);
+  }
 });
 
 // Rate Menu: Show 1-10 stars rating buttons

@@ -864,24 +864,42 @@ export class AnimeLibService {
         media.items_count?.uploaded ??
         media.last_item_number;
 
-      // Колокольчик уведомлений
+      // Колокольчик уведомлений со всеми вложенными структурами и полями API
       const hasNotification = Boolean(
         item.has_notifications ||
-        item.notify ||
+        item.subscription?.status ||
+        item.subscription?.notice ||
+        item.subscription?.is_subscribed ||
         item.subscription ||
-        item.is_subscribed ||
+        item.notify ||
         item.notice ||
+        item.is_subscribed ||
         item.subscribe ||
         item.has_notification ||
         item.notification ||
+        item.user?.subscribed ||
+        item.user?.subscription ||
+        item.meta?.has_notifications ||
+        item.meta?.subscription ||
+        item.meta?.is_subscribed ||
+        item.meta?.notify ||
         media.has_notifications ||
-        media.notify ||
+        media.subscription?.status ||
+        media.subscription?.notice ||
+        media.subscription?.is_subscribed ||
         media.subscription ||
-        media.is_subscribed ||
+        media.notify ||
         media.notice ||
+        media.is_subscribed ||
         media.subscribe ||
         media.has_notification ||
-        media.notification
+        media.notification ||
+        media.user?.subscribed ||
+        media.user?.subscription ||
+        media.meta?.has_notifications ||
+        media.meta?.subscription ||
+        media.meta?.is_subscribed ||
+        media.meta?.notify
       );
 
       // Анализ статуса тайтла (завершен ли релиз)
