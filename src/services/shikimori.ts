@@ -2,7 +2,11 @@ import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'ax
 import { dbService, getTokens, saveTokens, deleteTokens } from '../db/database.js';
 import { animelibService, AnimeLibService } from './animelib.js';
 
-let isShikimoriAuthRevoked = false;
+export let isShikimoriAuthRevoked = false;
+
+export function setShikimoriAuthRevoked(revoked: boolean) {
+  isShikimoriAuthRevoked = revoked;
+}
 
 export interface UserExclusionData {
   excludedIds: Set<number>;
@@ -628,6 +632,16 @@ export class ShikimoriService {
       const res = await this.client.post('/api/v2/user_rates', { user_rate: postData }, { headers });
       return res.data;
     }
+  }
+
+  isAuthorized(): boolean {
+    if (isShikimoriAuthRevoked) return false;
+    const tokens = getTokens('shikimori');
+    return Boolean(tokens?.access_token || process.env.SHIKIMORI_ACCESS_TOKEN);
+  }
+
+  isAuthRevoked(): boolean {
+    return isShikimoriAuthRevoked;
   }
 }
 

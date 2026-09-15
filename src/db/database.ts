@@ -65,6 +65,16 @@ try {
 } catch {
 }
 
+try {
+  db.exec('ALTER TABLE animelib_sync ADD COLUMN is_favorite INTEGER DEFAULT 0');
+} catch {
+}
+
+try {
+  db.exec('CREATE VIEW IF NOT EXISTS sync_items AS SELECT * FROM animelib_sync');
+} catch {
+}
+
 db.exec('CREATE TABLE IF NOT EXISTS user_preferences (' +
   'user_id TEXT PRIMARY KEY, ' +
   'favorite_voiceovers TEXT DEFAULT "[]", ' +
@@ -157,7 +167,20 @@ export interface AnimeLibSyncRecord {
   shiki_synced: number;
   custom_note?: string;
   is_subscribed?: number;
+  is_favorite?: number;
   last_checked_at?: number;
+}
+
+export interface DBLibraryStats {
+  watching: number;
+  planned: number;
+  completed: number;
+  dropped: number;
+  on_hold: number;
+  rewatching: number;
+  favorites: number;
+  total: number;
+  shiki_synced: number;
 }
 
 export interface UserPreferencesRecord {
@@ -266,8 +289,8 @@ export const dbService = {
   },
 
   upsertSyncItem(item: Partial<AnimeLibSyncRecord> & { media_id: number; title: string }) {
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, is_favorite, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
@@ -279,6 +302,7 @@ export const dbService = {
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
       'custom_note = COALESCE(excluded.custom_note, animelib_sync.custom_note), ' +
       'is_subscribed = COALESCE(excluded.is_subscribed, animelib_sync.is_subscribed), ' +
+      'is_favorite = COALESCE(excluded.is_favorite, animelib_sync.is_favorite), ' +
       'last_checked_at = excluded.last_checked_at';
     const stmt = db.prepare(query);
     stmt.run(
@@ -293,14 +317,15 @@ export const dbService = {
       item.shiki_synced || 0,
       item.custom_note || null,
       item.is_subscribed !== undefined ? item.is_subscribed : 0,
+      item.is_favorite !== undefined ? item.is_favorite : 0,
       Date.now()
     );
   },
 
   batchUpsertSyncItems(items: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }>) {
     if (!items || items.length === 0) return;
-    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, last_checked_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+    const query = 'INSERT INTO animelib_sync (media_id, title, rus_title, status, last_tracked_episode, latest_episode, preferred_voiceover, shiki_id, shiki_synced, custom_note, is_subscribed, is_favorite, last_checked_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
       'ON CONFLICT(media_id) DO UPDATE SET ' +
       'title = excluded.title, ' +
       'rus_title = excluded.rus_title, ' +
@@ -312,6 +337,7 @@ export const dbService = {
       'shiki_synced = COALESCE(excluded.shiki_synced, animelib_sync.shiki_synced), ' +
       'custom_note = COALESCE(excluded.custom_note, animelib_sync.custom_note), ' +
       'is_subscribed = COALESCE(excluded.is_subscribed, animelib_sync.is_subscribed), ' +
+      'is_favorite = COALESCE(excluded.is_favorite, animelib_sync.is_favorite), ' +
       'last_checked_at = excluded.last_checked_at';
 
     this.transaction(() => {
@@ -330,10 +356,54 @@ export const dbService = {
           item.shiki_synced || 0,
           item.custom_note || null,
           item.is_subscribed !== undefined ? item.is_subscribed : 0,
+          item.is_favorite !== undefined ? item.is_favorite : 0,
           now
         );
       }
     });
+  },
+
+  getLibraryStats(): DBLibraryStats {
+    const query = `
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'watching' THEN 1 ELSE 0 END) as watching,
+        SUM(CASE WHEN status = 'planned' THEN 1 ELSE 0 END) as planned,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status = 'dropped' THEN 1 ELSE 0 END) as dropped,
+        SUM(CASE WHEN status = 'on_hold' THEN 1 ELSE 0 END) as on_hold,
+        SUM(CASE WHEN status = 'rewatching' THEN 1 ELSE 0 END) as rewatching,
+        SUM(CASE WHEN is_favorite = 1 OR status = 'favorites' THEN 1 ELSE 0 END) as favorites,
+        SUM(CASE WHEN shiki_synced = 1 OR shiki_id IS NOT NULL THEN 1 ELSE 0 END) as shiki_synced
+      FROM sync_items
+    `;
+    try {
+      const stmt = db.prepare(query);
+      const row = stmt.get() as any;
+      return {
+        total: Number(row?.total) || 0,
+        watching: Number(row?.watching) || 0,
+        planned: Number(row?.planned) || 0,
+        completed: Number(row?.completed) || 0,
+        dropped: Number(row?.dropped) || 0,
+        on_hold: Number(row?.on_hold) || 0,
+        rewatching: Number(row?.rewatching) || 0,
+        favorites: Number(row?.favorites) || 0,
+        shiki_synced: Number(row?.shiki_synced) || 0,
+      };
+    } catch {
+      return {
+        total: 0,
+        watching: 0,
+        planned: 0,
+        completed: 0,
+        dropped: 0,
+        on_hold: 0,
+        rewatching: 0,
+        favorites: 0,
+        shiki_synced: 0,
+      };
+    }
   },
 
   setPreferredVoiceover(mediaId: number, voiceover: string | null) {

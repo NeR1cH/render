@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard, Keyboard, Context } from 'grammy';
 import dotenv from 'dotenv';
 import { animelibService, AnimeLibService, ANIMELIB_WEB_URL, AnimeLibBookmarkItem, POPULAR_STUDIOS } from '../services/animelib';
-import { shikimoriService, ShikimoriAnime } from '../services/shikimori';
+import { shikimoriService, ShikimoriAnime, isShikimoriAuthRevoked } from '../services/shikimori';
 import { dbService, AnimeLibSyncRecord, UserPreferencesRecord } from '../db/database';
 import { getLibraryComprehensiveStats } from '../services/libraryStats';
 import { downloaderService } from '../services/downloader';
@@ -63,7 +63,7 @@ export function formatAnimeCard(data: {
   cardStyle?: string;
   maxQuality?: string;
   availablePlayers?: string[];
-  folderStatus?: 'watching' | 'planned';
+  folderStatus?: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold';
 }): string {
   const displayTitle = data.rusTitle || data.title;
   const originalTitle = data.rusTitle && data.title !== data.rusTitle ? ` <i>(${data.title})</i>` : '';
@@ -590,6 +590,9 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
     : 'Выключен';
   const favOnlyStatus = prefs.notify_only_favorites ? 'Только любимые студии' : 'Все релизы';
 
+  const storageStats = downloaderService.getStorageStats();
+  const storageSummary = `${storageStats.totalFiles} серий (${storageStats.totalSizeFormatted})`;
+
   const text = [
     '⚙️ <b>Панель настроек и студий озвучки</b>',
     '━━━━━━━━━━━━━━━━━━━━',
@@ -602,6 +605,7 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
     `🎨 <b>Стиль карточек:</b> <code>${prefs.card_style || 'full'}</code>`,
     `⏱ <b>Интервал проверки:</b> <code>каждые ${prefs.check_interval_min || 30} мин</code>`,
     `🔕 <b>Ночной тихий режим:</b> <code>${quietStatus}</code>`,
+    `💾 <b>Хранилище серий:</b> <code>${escapeHtml(storageSummary)}</code>`,
     '',
     '<i>Нажимайте кнопки ниже для моментального переключения параметров:</i>',
   ].join('\n');
@@ -629,9 +633,10 @@ export function renderSettingsKeyboard(userId: string): { text: string; keyboard
     .row();
 
   // Intervals
-  kb.text('⏱ 15 мин', 'set_interval:15')
-    .text('⏱ 30 мин', 'set_interval:30')
-    .text('⏱ 1 час', 'set_interval:60')
+  const currentInterval = prefs.check_interval_min || 30;
+  kb.text(currentInterval === 15 ? '⏱ 15 мин ✅' : '⏱ 15 мин', 'set_interval:15')
+    .text(currentInterval === 30 ? '⏱ 30 мин ✅' : '⏱ 30 мин', 'set_interval:30')
+    .text(currentInterval === 60 ? '⏱ 1 час ✅' : '⏱ 1 час', 'set_interval:60')
     .row();
 
   // Close menu button
@@ -1199,12 +1204,17 @@ async function showRandomRecommendation(ctx: Context, category: 'all' | 'planned
 
 export async function showLibraryStats(ctx: Context) {
   const userId = ctx.from?.id ? String(ctx.from.id) : DEFAULT_CHAT_ID || 'default_user';
-  const profile = await shikimoriService.getUserProfile().catch(() => null);
+  const isShikiConnected = shikimoriService.isAuthorized();
+  const isRevoked = shikimoriService.isAuthRevoked();
+  const profile = isShikiConnected ? await shikimoriService.getUserProfile().catch(() => null) : null;
   const libStats = await getLibraryComprehensiveStats(userId);
 
   const animelibUserId = process.env.ANIMELIB_USER_ID || 'Не указан';
-  const shikiNick = profile?.nickname || 'Не привязан';
+  const shikiNick = profile?.nickname || (isRevoked ? 'Токен отозван (требуется повторная авторизация)' : 'Не привязан');
   const shikiId = profile?.id ? String(profile.id) : '—';
+  const bridgeStatus = isShikiConnected
+    ? 'AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]'
+    : (isRevoked ? 'AnimeLib ➔ SQLite [Токен Shikimori отозван ⚠️]' : 'AnimeLib ➔ SQLite [Shikimori не привязан ⏸️]');
 
   let checkSection: string;
   if (libStats.lastCheck) {
@@ -1255,7 +1265,7 @@ export async function showLibraryStats(ctx: Context) {
     '🔄 <b>Синхронизация & Миграция на Shikimori:</b>',
     `  • 🚀 <b>Перенесено на Shikimori:</b> <code>${libStats.shikiTransferredCount} / ${libStats.totalTracked}</code> (${libStats.shikiMatchRatePercent}%)`,
     `  • 🎯 <b>Проверено & сматчено:</b> <code>${libStats.shikiVerifiedCount}</code> тайтлов`,
-    '  • 🔗 <b>Мост:</b> AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]',
+    `  • 🔗 <b>Мост:</b> ${bridgeStatus}`,
     '',
     checkSection,
   ];
@@ -1712,11 +1722,11 @@ export async function handleDownloadStreamSelection(
       s.voiceover &&
       (s.voiceover.toLowerCase().includes(preferredVo.toLowerCase()) || preferredVo.toLowerCase().includes(s.voiceover.toLowerCase()))
     );
-    const star = isPreferred ? '⭐️ ' : '';
+    const badge = isPreferred ? '✅ ' : '';
     const qBadge = s.quality === '2160p' ? '4K' : (s.quality ? s.quality.replace('p', '') : 'Auto');
     const srcBadge = s.source === 'animelib' ? 'AnimeLib' : (s.source === 'kodik' ? 'Kodik' : (s.source || 'Native'));
     const voText = s.voiceover || 'Оригинал';
-    const rawLabel = `${star}🎬 [${qBadge}] ${srcBadge} • ${voText}`;
+    const rawLabel = `${badge}🎬 [${qBadge}] ${srcBadge} • ${voText}`;
     const label = rawLabel.length > 36 ? `${rawLabel.slice(0, 35)}…` : rawLabel;
 
     // callback_data ультракомпактный: dq:<mediaId>:<ep>:<index> (< 18 байт)

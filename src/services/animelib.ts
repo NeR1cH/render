@@ -24,7 +24,7 @@ export interface AnimeLibBookmarkItem {
   current_progress_number?: number;
   last_item_number?: number;
   poster?: string;
-  folderStatus?: 'watching' | 'planned';
+  folderStatus?: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold';
   status_slug?: string;
   is_subscribed?: boolean;
   has_notifications?: boolean;
@@ -589,7 +589,9 @@ export class AnimeLibService {
    * Загрузка закладок из локальных файлов (animelib_export.json, shikimori_*.json),
    * если в окружении нет куки или AnimeLib API недоступен
    */
-  getLocalFallbackBookmarks(folder: 'watching' | 'planned'): { all: AnimeLibBookmarkItem[]; unreleased: AnimeLibBookmarkItem[] } {
+  getLocalFallbackBookmarks(
+    folder: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold'
+  ): { all: AnimeLibBookmarkItem[]; unreleased: AnimeLibBookmarkItem[] } {
     try {
       const all: AnimeLibBookmarkItem[] = [];
       const unreleased: AnimeLibBookmarkItem[] = [];
@@ -648,6 +650,50 @@ export class AnimeLibService {
             unreleased.push(entry);
           }
         }
+      } else if (folder === 'completed') {
+        const p = path.resolve(process.cwd(), 'shikimori_completed.json');
+        if (fs.existsSync(p)) {
+          const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          const list = Array.isArray(raw.items) ? raw.items : (Array.isArray(raw.data) ? raw.data : (Array.isArray(raw) ? raw : []));
+          for (const item of list) {
+            const media = item.media || item.anime || item;
+            const mediaId = media.id || item.media_id || item.id;
+            if (!mediaId) continue;
+            const entry: AnimeLibBookmarkItem = {
+              media_id: mediaId,
+              slug_url: media.slug_url || media.slug || item.slug_url || String(mediaId),
+              name: media.name || media.title || item.name || '',
+              rus_name: media.rus_name || item.rus_name || '',
+              current_progress_number: parseEpisodeNumber(item.progress ?? item.episodes),
+              last_item_number: parseEpisodeNumber(item.episodes ?? item.total_episodes ?? 0),
+              folderStatus: 'completed',
+              status_slug: 'completed',
+            };
+            all.push(entry);
+          }
+        }
+      } else if (folder === 'dropped') {
+        const p = path.resolve(process.cwd(), 'shikimori_dropped.json');
+        if (fs.existsSync(p)) {
+          const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          const list = Array.isArray(raw.items) ? raw.items : (Array.isArray(raw.data) ? raw.data : (Array.isArray(raw) ? raw : []));
+          for (const item of list) {
+            const media = item.media || item.anime || item;
+            const mediaId = media.id || item.media_id || item.id;
+            if (!mediaId) continue;
+            const entry: AnimeLibBookmarkItem = {
+              media_id: mediaId,
+              slug_url: media.slug_url || media.slug || item.slug_url || String(mediaId),
+              name: media.name || media.title || item.name || '',
+              rus_name: media.rus_name || item.rus_name || '',
+              current_progress_number: parseEpisodeNumber(item.progress),
+              last_item_number: parseEpisodeNumber(item.episodes ?? 0),
+              folderStatus: 'dropped',
+              status_slug: 'dropped',
+            };
+            all.push(entry);
+          }
+        }
       }
 
       return { all, unreleased };
@@ -664,12 +710,13 @@ export class AnimeLibService {
     const counts = { watching: 0, planned: 0, completed: 0, dropped: 0, on_hold: 0, total: 0 };
     const toSync: Array<Partial<AnimeLibSyncRecord> & { media_id: number; title: string }> = [];
 
-    const fileMap: Array<{ file: string; status: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold' }> = [
+    const fileMap: Array<{ file: string; status: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold'; isFav?: boolean }> = [
       { file: 'animelib_export.json', status: 'watching' },
       { file: 'shikimori_watching.json', status: 'watching' },
       { file: 'shikimori_planned.json', status: 'planned' },
       { file: 'shikimori_completed.json', status: 'completed' },
       { file: 'shikimori_dropped.json', status: 'dropped' },
+      { file: 'animelib_custom_fate.json', status: 'completed' },
     ];
 
     for (const entry of fileMap) {
@@ -677,12 +724,14 @@ export class AnimeLibService {
       if (!fs.existsSync(p)) continue;
       try {
         const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
-        const list = Array.isArray(raw.data) ? raw.data : (Array.isArray(raw.items) ? raw.items : []);
+        const list = Array.isArray(raw.data) ? raw.data : (Array.isArray(raw.items) ? raw.items : (Array.isArray(raw) ? raw : []));
         for (const item of list) {
           const media = item.media || item.anime || item;
           const mediaId = media.id || item.media_id;
           const title = media.name || media.title || item.name || '';
           if (!mediaId || !title) continue;
+          const itemStatus = Number(item.status);
+          const isFav = itemStatus === 25 || item.is_favorite === 1 || Boolean(entry.isFav);
           toSync.push({
             media_id: mediaId,
             title,
@@ -690,6 +739,9 @@ export class AnimeLibService {
             status: entry.status,
             last_tracked_episode: parseEpisodeNumber(item.progress ?? item.meta?.item_number ?? item.item?.number),
             latest_episode: parseEpisodeNumber(media.metadata?.last_item?.number ?? media.items_count?.uploaded ?? 0),
+            is_favorite: isFav ? 1 : 0,
+            shiki_id: item.shiki_id || item.matched_shiki_id || item.target_id || undefined,
+            shiki_synced: (item.shiki_id || item.matched_shiki_id || item.target_id) ? 1 : 0,
           });
           counts[entry.status]++;
         }
@@ -712,7 +764,7 @@ export class AnimeLibService {
    */
   async fetchBookmarksPaginated(
     statusId: number,
-    folder: 'watching' | 'planned',
+    folder: 'watching' | 'planned' | 'completed' | 'dropped' | 'on_hold',
     maxPages: number = 25
   ): Promise<{ all: AnimeLibBookmarkItem[]; unreleased: AnimeLibBookmarkItem[] }> {
     const headers = this.getAuthHeaders();
@@ -881,7 +933,9 @@ export class AnimeLibService {
         media_id: entry.media_id,
         title: entry.name,
         rus_title: entry.rus_name,
-        status: folder === 'watching' ? 'watching' : (isReleased ? 'completed' : folder),
+        status: (folder === 'watching' || folder === 'completed' || folder === 'dropped' || folder === 'on_hold')
+          ? folder
+          : (isReleased ? 'completed' : folder),
         last_tracked_episode: entry.current_progress_number || 0,
         latest_episode: entry.last_item_number || 0,
         is_subscribed: hasNotification ? 1 : 0,
@@ -1003,7 +1057,7 @@ export class AnimeLibService {
     for (const cat of categories) {
       let catItems: AnimeLibBookmarkItem[] = [];
       for (const stId of cat.statusIds) {
-        const { all } = await this.fetchBookmarksPaginated(stId, cat.folder === 'watching' ? 'watching' : 'planned', 25);
+        const { all } = await this.fetchBookmarksPaginated(stId, cat.folder, 25);
         if (all.length > 0) {
           catItems = all;
           break;

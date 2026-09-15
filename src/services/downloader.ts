@@ -118,9 +118,11 @@ async function fetchSegmentWithRetry(
 export class DownloaderService {
   private isProcessing: boolean = false;
   private readonly downloadsDir = path.resolve(process.cwd(), 'downloads');
+  private cancelledTaskIds = new Set<number>();
 
   constructor() {
     this.ensureDownloadsDir();
+    this.cleanupOrphanedTempFiles();
   }
 
   /**
@@ -135,6 +137,79 @@ export class DownloaderService {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[Downloader] Не удалось создать директорию downloads/:', msg);
     }
+  }
+
+  /**
+   * Удаление брошенных временных файлов (.ts и temp_*) при старте приложения
+   */
+  cleanupOrphanedTempFiles(): void {
+    try {
+      if (!fs.existsSync(this.downloadsDir)) return;
+      const files = fs.readdirSync(this.downloadsDir);
+      let removedCount = 0;
+      for (const file of files) {
+        if (file.startsWith('temp_') || file.endsWith('.ts')) {
+          try {
+            fs.unlinkSync(path.join(this.downloadsDir, file));
+            removedCount++;
+          } catch {}
+        }
+      }
+      if (removedCount > 0) {
+        console.log(`[Downloader] Очищено незавершённых временных файлов HLS: ${removedCount}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[Downloader] Ошибка при очистке временных файлов:', msg);
+    }
+  }
+
+  /**
+   * Получить реальную статистику дискового хранилища downloads/
+   */
+  getStorageStats(): { totalFiles: number; totalSizeBytes: number; totalSizeFormatted: string } {
+    try {
+      this.ensureDownloadsDir();
+      const files = fs.readdirSync(this.downloadsDir);
+      let totalFiles = 0;
+      let totalSizeBytes = 0;
+
+      for (const file of files) {
+        if (file.endsWith('.mp4') || file.endsWith('.mkv')) {
+          try {
+            const stat = fs.statSync(path.join(this.downloadsDir, file));
+            if (stat.isFile()) {
+              totalFiles++;
+              totalSizeBytes += stat.size;
+            }
+          } catch {}
+        }
+      }
+
+      let totalSizeFormatted = '0 МБ';
+      if (totalSizeBytes >= 1024 * 1024 * 1024) {
+        totalSizeFormatted = `${(totalSizeBytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`;
+      } else {
+        totalSizeFormatted = `${(totalSizeBytes / (1024 * 1024)).toFixed(1)} МБ`;
+      }
+
+      return { totalFiles, totalSizeBytes, totalSizeFormatted };
+    } catch {
+      return { totalFiles: 0, totalSizeBytes: 0, totalSizeFormatted: '0 МБ' };
+    }
+  }
+
+  /**
+   * Отмена загрузки задачи
+   */
+  cancelTask(taskId: number): boolean {
+    this.cancelledTaskIds.add(taskId);
+    dbService.updateDownloadStatus(taskId, 'error', 0);
+    return true;
+  }
+
+  isTaskCancelled(taskId: number): boolean {
+    return this.cancelledTaskIds.has(taskId);
   }
 
   /**
@@ -497,6 +572,16 @@ export class DownloaderService {
 
       // 4. Скачиваем сегменты контролируемым пулом по 3 штуки
       for (let i = 0; i < segmentUrls.length; i += BATCH_SIZE) {
+        if (this.isTaskCancelled(task.id)) {
+          console.log(`[Downloader HLS] Задача #${task.id} отменена пользователем. Прекращение загрузки.`);
+          if (fs.existsSync(tempTsPath)) {
+            try {
+              fs.unlinkSync(tempTsPath);
+            } catch {}
+          }
+          throw new Error('Загрузка отменена пользователем');
+        }
+
         const batch = segmentUrls.slice(i, i + BATCH_SIZE);
         const buffers = await Promise.all(
           batch.map((url) => fetchSegmentWithRetry(url, effectiveHeaders))
