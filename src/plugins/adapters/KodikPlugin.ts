@@ -20,8 +20,6 @@ export class KodikPlugin extends BaseSourcePlugin {
   private readonly apiBases = [
     process.env.ANIMELIB_API_URL,
     'https://hapi.hentaicdn.org/api',
-    'https://anmli.org/api',
-    'https://api.lib.social/api',
   ].filter(Boolean) as string[];
 
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {

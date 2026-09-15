@@ -79,8 +79,8 @@ export abstract class BaseSourcePlugin implements ISourcePlugin {
 
     const lowerUrl = url.toLowerCase();
 
-    // Доверенные CDN ноды AnimeLib, Kodik и зеркала (.lib.social, .animelib, .anmli, kodik, cdn)
-    const trustedHosts = ['.lib.social', '.animelib', '.anmli', 'kodik', 'cdn', 'aniqit'];
+    // Доверенные CDN ноды AnimeLib, Kodik и зеркала (hentaicdn, cdnlib, kodik, cdn, aniqit)
+    const trustedHosts = ['hentaicdn', 'cdnlib', 'kodik', 'cdn', 'aniqit'];
     if (trustedHosts.some((h) => lowerUrl.includes(h))) {
       return true;
     }
