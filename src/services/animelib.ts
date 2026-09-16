@@ -1471,8 +1471,8 @@ export class AnimeLibService {
       }
 
       // Если в URL серии вида /seria/123/hash нет качества, запрашиваем 1080p для максимального разрешения
-      if (/\/seria\/\d+\/[a-zA-Z0-9]+$/.test(pageUrl)) {
-        pageUrl += '/1080p';
+      if (/\/seria\/\d+\/[a-zA-Z0-9]+(?:\/)?$/.test(pageUrl.replace(/\/$/, ''))) {
+        pageUrl = pageUrl.replace(/\/$/, '') + '/1080p';
       }
 
       const parsedUrl = new URL(pageUrl);

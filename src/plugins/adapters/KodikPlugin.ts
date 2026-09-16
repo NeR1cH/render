@@ -46,13 +46,12 @@ export class KodikPlugin extends BaseSourcePlugin {
           if (resolved && resolved.url) {
             results.push({
               url: resolved.url,
-              quality: this.normalizeQuality(resolved.quality),
+              quality: this.normalizeQuality(resolved.quality || '1080p'),
               format: (resolved.format as any) || this.detectFormat(resolved.url),
               headers: resolved.headers || this.buildHeaders(item.url, 'https://kodikplayer.com'),
               voiceover: item.voiceover || voiceover || 'Kodik',
               source: this.id,
             });
-            break;
           }
         } catch {}
       }
@@ -148,11 +147,19 @@ export class KodikPlugin extends BaseSourcePlugin {
 
   private async resolveKodikManifest(kodikUrl: string, voiceover?: string): Promise<StreamResult | null> {
     try {
-      const parsed = new URL(kodikUrl);
+      let targetUrl = kodikUrl.trim();
+      if (targetUrl.startsWith('//')) {
+        targetUrl = 'https:' + targetUrl;
+      }
+      if (/\/seria\/\d+\/[a-zA-Z0-9]+(?:\/)?$/.test(targetUrl.replace(/\/$/, ''))) {
+        targetUrl = targetUrl.replace(/\/$/, '') + '/1080p';
+      }
+
+      const parsed = new URL(targetUrl);
       const origin = `${parsed.protocol}//${parsed.host}`;
 
-      const res = await axios.get<string>(kodikUrl, {
-        headers: this.buildHeaders(kodikUrl, origin),
+      const res = await axios.get<string>(targetUrl, {
+        headers: this.buildHeaders(targetUrl, origin),
         timeout: 8000,
       });
 

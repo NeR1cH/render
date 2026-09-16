@@ -904,6 +904,16 @@ export async function showPlannedList(
     });
   }
 
+  // Если в «Запланированном» с фильтром по колокольчику найдено 0 тайтлов,
+  // бот автоматически выводит тайтлы из папки «Запланировано» с кнопкой «Показать все запланированные (X)»
+  if (filterBellOnly && displayList.length === 0 && plannedItems.length > 0) {
+    displayList = [...plannedItems].sort((a, b) => {
+      const aEp = a.last_item_number || 0;
+      const bEp = b.last_item_number || 0;
+      return bEp - aEp;
+    });
+  }
+
   if (filterBellOnly && displayList.length === 0) {
     const noBellKb = new InlineKeyboard()
       .text(`📂 Показать все запланированные (${plannedItems.length})`, 'list_planned_all')
@@ -1222,7 +1232,7 @@ export async function showLibraryStats(ctx: Context) {
   const shikiId = profile?.id ? String(profile.id) : '—';
   const bridgeStatus = isShikiConnected
     ? 'AnimeLib ➔ SQLite ➔ Shikimori [Активен ✅]'
-    : (isRevoked ? 'AnimeLib ➔ SQLite [Токен Shikimori отозван ⚠️]' : 'AnimeLib ➔ SQLite [Shikimori не привязан ⏸️]');
+    : (isRevoked ? 'AnimeLib ➔ SQLite [Токен Shikimori отозван ⚠️]' : 'AnimeLib ➔ SQLite [Локальный режим ⏸]');
 
   let checkSection: string;
   if (libStats.lastCheck) {
@@ -1732,12 +1742,7 @@ export async function handleDownloadStreamSelection(
     return;
   }
 
-  // Если стрим ровно 1 — сразу запускаем скачивание
-  if (streams.length === 1) {
-    const stream = streams[0];
-    await queueAndStartDownload(ctx, mediaId, ep, stream.voiceover, stream.quality, stream.source);
-    return;
-  }
+  // Всегда показываем кнопки выбора качества и плеера пользователю, даже если найден только один стрим
 
   // Сортировка стримов:
   // 1. Предпочитаемая озвучка (если совпадает)
