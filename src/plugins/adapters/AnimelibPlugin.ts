@@ -287,13 +287,33 @@ export class AnimelibPlugin extends BaseSourcePlugin {
           source: this.id,
         });
 
-        // Если это шаблонный URL вида ..._1080.mp4 или .../1080p.mp4, генерируем альтернативные качества при наличии флага
+        // Если это шаблонный URL вида ..._1080.mp4 или .../1080p, генерируем альтернативные качества
         if (streamUrl.includes('_1080.mp4')) {
           const url720 = streamUrl.replace('_1080.mp4', '_720.mp4');
           list.push({
             url: url720,
             quality: '720p',
             format: 'mp4',
+            headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
+            voiceover,
+            source: this.id,
+          });
+        } else if (/\/720p(?:\/)?$/.test(streamUrl)) {
+          const url1080 = streamUrl.replace(/\/720p(?:\/)?$/, '/1080p');
+          list.unshift({
+            url: url1080,
+            quality: '1080p',
+            format: this.detectFormat(url1080),
+            headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
+            voiceover,
+            source: this.id,
+          });
+        } else if (/\/1080p(?:\/)?$/.test(streamUrl)) {
+          const url720 = streamUrl.replace(/\/1080p(?:\/)?$/, '/720p');
+          list.push({
+            url: url720,
+            quality: '720p',
+            format: this.detectFormat(url720),
             headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
             voiceover,
             source: this.id,

@@ -50,11 +50,49 @@ export class KodikPlugin extends BaseSourcePlugin {
     const results: StreamResult[] = [];
 
     for (const item of kodikUrls) {
-      const stream = await this.resolveKodikManifest(item.url, item.voiceover || voiceover);
-      if (stream) {
-        const isAlive = await this.isStreamLikelyAlive(stream.url, stream.headers);
-        if (isAlive) {
-          results.push(stream);
+      // 1. Если плеер kodik имеет суффикс /720p или не имеет суффикса, генерируем вариант 1080p
+      let candidateUrls: Array<{ url: string; targetQuality: '1080p' | '720p' }> = [];
+      const trimmedUrl = item.url.trim();
+
+      if (/\/720p(?:\/)?$/.test(trimmedUrl)) {
+        candidateUrls.push({
+          url: trimmedUrl.replace(/\/720p(?:\/)?$/, '/1080p'),
+          targetQuality: '1080p',
+        });
+        candidateUrls.push({
+          url: trimmedUrl,
+          targetQuality: '720p',
+        });
+      } else if (/\/1080p(?:\/)?$/.test(trimmedUrl)) {
+        candidateUrls.push({
+          url: trimmedUrl,
+          targetQuality: '1080p',
+        });
+        candidateUrls.push({
+          url: trimmedUrl.replace(/\/1080p(?:\/)?$/, '/720p'),
+          targetQuality: '720p',
+        });
+      } else {
+        candidateUrls.push({
+          url: trimmedUrl.replace(/\/$/, '') + '/1080p',
+          targetQuality: '1080p',
+        });
+        candidateUrls.push({
+          url: trimmedUrl.replace(/\/$/, '') + '/720p',
+          targetQuality: '720p',
+        });
+      }
+
+      for (const cand of candidateUrls) {
+        const stream = await this.resolveKodikManifest(cand.url, item.voiceover || voiceover, cand.targetQuality);
+        if (stream) {
+          const isAlive = await this.isStreamLikelyAlive(stream.url, stream.headers);
+          if (isAlive) {
+            // Предотвращаем дублирование одинаковых stream.url
+            if (!results.some(r => r.url === stream.url && r.quality === stream.quality)) {
+              results.push(stream);
+            }
+          }
         }
       }
     }
@@ -176,26 +214,55 @@ export class KodikPlugin extends BaseSourcePlugin {
     return [];
   }
 
-  private async resolveKodikManifest(kodikUrl: string, voiceover?: string): Promise<StreamResult | null> {
-    try {
-      let targetUrl = kodikUrl.trim();
-      if (targetUrl.startsWith('//')) {
-        targetUrl = 'https:' + targetUrl;
-      }
-      if (/\/seria\/\d+\/[a-zA-Z0-9]+(?:\/)?$/.test(targetUrl.replace(/\/$/, ''))) {
-        targetUrl = targetUrl.replace(/\/$/, '') + '/1080p';
-      }
+  private async resolveKodikManifest(
+    kodikUrl: string,
+    voiceover?: string,
+    targetQuality: '1080p' | '720p' = '1080p'
+  ): Promise<StreamResult | null> {
+    let targetUrl = kodikUrl.trim();
+    if (targetUrl.startsWith('//')) {
+      targetUrl = 'https:' + targetUrl;
+    }
+    if (/\/seria\/\d+\/[a-zA-Z0-9]+(?:\/)?$/.test(targetUrl.replace(/\/$/, ''))) {
+      targetUrl = targetUrl.replace(/\/$/, '') + `/${targetQuality}`;
+    }
 
+    try {
       const parsed = new URL(targetUrl);
       const origin = `${parsed.protocol}//${parsed.host}`;
 
-      const res = await axios.get<string>(targetUrl, {
-        headers: this.buildHeaders(targetUrl, origin),
-        timeout: 8000,
-      });
+      let html: string | null = null;
+      let effectiveUrl = targetUrl;
+      let effectiveQuality = targetQuality;
 
-      const html = res.data;
-      if (typeof html !== 'string') {
+      try {
+        const res = await axios.get<string>(targetUrl, {
+          headers: this.buildHeaders(targetUrl, origin),
+          timeout: 8000,
+        });
+        html = typeof res.data === 'string' ? res.data : null;
+      } catch (err: any) {
+        // Если запрос на 1080p вернул 404, откатываемся к 720p
+        if (err?.response?.status === 404 && targetUrl.includes('/1080p')) {
+          const fallbackUrl = targetUrl.replace('/1080p', '/720p');
+          console.log(`[KodikPlugin] 1080p вернул 404, fallback к 720p: ${fallbackUrl}`);
+          try {
+            const fallbackRes = await axios.get<string>(fallbackUrl, {
+              headers: this.buildHeaders(fallbackUrl, origin),
+              timeout: 8000,
+            });
+            html = typeof fallbackRes.data === 'string' ? fallbackRes.data : null;
+            effectiveUrl = fallbackUrl;
+            effectiveQuality = '720p';
+          } catch {
+            return null;
+          }
+        } else {
+          return null;
+        }
+      }
+
+      if (!html) {
         return null;
       }
 
@@ -205,9 +272,9 @@ export class KodikPlugin extends BaseSourcePlugin {
         const cleanUrl = m3u8Match[0].replace(/\\/g, '');
         return {
           url: cleanUrl,
-          quality: '1080p',
+          quality: effectiveQuality,
           format: 'm3u8',
-          headers: this.buildHeaders(kodikUrl, origin),
+          headers: this.buildHeaders(effectiveUrl, origin),
           voiceover: voiceover || 'Kodik',
           source: this.id,
         };
@@ -222,9 +289,9 @@ export class KodikPlugin extends BaseSourcePlugin {
         if (streamUrlMatch && streamUrlMatch[0]) {
           return {
             url: streamUrlMatch[0].replace(/\\/g, ''),
-            quality: '1080p',
+            quality: effectiveQuality,
             format: 'm3u8',
-            headers: this.buildHeaders(kodikUrl, origin),
+            headers: this.buildHeaders(effectiveUrl, origin),
             voiceover: voiceover || 'Kodik',
             source: this.id,
           };
@@ -232,13 +299,13 @@ export class KodikPlugin extends BaseSourcePlugin {
       }
 
       // 3. Если прямого URL нет в HTML, пытаемся разрешить через animelibService.resolveKodikStream (POST /ftor)
-      const resolved = await animelibService.resolveKodikStream(targetUrl);
+      const resolved = await animelibService.resolveKodikStream(effectiveUrl);
       if (resolved && resolved.url) {
         return {
           url: resolved.url,
-          quality: this.normalizeQuality(resolved.quality || '1080p'),
+          quality: this.normalizeQuality(resolved.quality || effectiveQuality),
           format: (resolved.format as any) || this.detectFormat(resolved.url),
-          headers: resolved.headers || this.buildHeaders(targetUrl, 'https://kodikplayer.com'),
+          headers: resolved.headers || this.buildHeaders(effectiveUrl, 'https://kodikplayer.com'),
           voiceover: voiceover || 'Kodik',
           source: this.id,
         };
