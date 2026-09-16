@@ -45,6 +45,27 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
   private readonly defaultApiHost = 'hapi.hentaicdn.org';
 
+  private getAnimelibApiHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Site-Id': '5',
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://animelib.me',
+      'Referer': 'https://animelib.me/',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    };
+
+    if (process.env.ANIMELIB_TOKEN) {
+      headers['Authorization'] = `Bearer ${process.env.ANIMELIB_TOKEN.replace(/^Bearer\s+/i, '')}`;
+    }
+
+    if (process.env.ANIMELIB_COOKIE) {
+      headers['Cookie'] = process.env.ANIMELIB_COOKIE;
+    }
+
+    return headers;
+  }
+
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
     const rawPlayers = await this.fetchEpisodePlayers(mediaId, episode);
@@ -91,6 +112,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
   private async fetchEpisodePlayers(mediaId: number, episode: number): Promise<RawPlayerPayload[]> {
     console.log(`[AnimelibPlugin] Запрос серий для mediaId: ${mediaId}...`);
+    const requestHeaders = this.getAnimelibApiHeaders();
 
     for (const base of this.apiBases) {
       try {
@@ -98,15 +120,15 @@ export class AnimelibPlugin extends BaseSourcePlugin {
         let res: any;
         try {
           res = await axios.get<any>(url, {
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
+            headers: requestHeaders,
+            timeout: 8000,
           });
         } catch {
           // Альтернативный эндпоинт query param
           res = await axios.get<any>(`${base}/episodes`, {
             params: { anime_id: mediaId },
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
+            headers: requestHeaders,
+            timeout: 8000,
           });
         }
 
@@ -123,25 +145,34 @@ export class AnimelibPlugin extends BaseSourcePlugin {
 
         // Если у эпизода уже есть массив players
         if (Array.isArray(targetEp.players) && targetEp.players.length > 0) {
+          console.log('[AnimelibPlugin] Ответ API плееров (из списка эпизодов):', JSON.stringify(targetEp.players));
           return targetEp.players;
         }
 
-        // Получаем плееры конкретного эпизода
-        const epPlayersUrl = `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-        try {
-          const playersRes = await axios.get<any>(epPlayersUrl, {
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
-          });
-          const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
-          if (players.length > 0) return players;
-        } catch {}
+        // Получаем плееры конкретного эпизода через эндпоинты плееров
+        const epPlayersEndpoints = [
+          `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`,
+          `${base}/episodes/${targetEp.id}/players`,
+        ];
+
+        for (const epPlayersUrl of epPlayersEndpoints) {
+          try {
+            const playersRes = await axios.get<any>(epPlayersUrl, {
+              headers: requestHeaders,
+              timeout: 8000,
+            });
+            console.log('[AnimelibPlugin] Ответ API плееров:', JSON.stringify(playersRes.data));
+            const players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
+            if (players.length > 0) return players;
+          } catch {}
+        }
 
         try {
           const epDetailRes = await axios.get<any>(`${base}/episodes/${targetEp.id}`, {
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
+            headers: requestHeaders,
+            timeout: 8000,
           });
+          console.log('[AnimelibPlugin] Ответ API деталей эпизода:', JSON.stringify(epDetailRes.data));
           const players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
           if (players.length > 0) return players;
         } catch {}
@@ -194,7 +225,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
             url: streamUrl,
             quality: q,
             format: this.detectFormat(streamUrl),
-            headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+            headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
             voiceover,
             source: this.id,
           });
@@ -210,7 +241,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
               url: streamUrl,
               quality: this.normalizeQuality(qKey),
               format: this.detectFormat(streamUrl),
-              headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+              headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
               voiceover,
               source: this.id,
             });
@@ -225,7 +256,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
               url: streamUrl,
               quality: this.normalizeQuality(val.resolution || val.quality || qKey),
               format: this.detectFormat(streamUrl),
-              headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+              headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
               voiceover,
               source: this.id,
             });
@@ -251,7 +282,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
           url: streamUrl,
           quality: detectedQuality,
           format: this.detectFormat(streamUrl),
-          headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+          headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
           voiceover,
           source: this.id,
         });
@@ -263,7 +294,7 @@ export class AnimelibPlugin extends BaseSourcePlugin {
             url: url720,
             quality: '720p',
             format: 'mp4',
-            headers: this.buildHeaders('https://animelib.org/', 'https://animelib.org'),
+            headers: this.buildHeaders('https://animelib.me/', 'https://animelib.me'),
             voiceover,
             source: this.id,
           });

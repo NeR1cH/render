@@ -22,6 +22,27 @@ export class KodikPlugin extends BaseSourcePlugin {
     'https://hapi.hentaicdn.org/api',
   ].filter(Boolean) as string[];
 
+  private getAnimelibApiHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'Site-Id': '5',
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://animelib.me',
+      'Referer': 'https://animelib.me/',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    };
+
+    if (process.env.ANIMELIB_TOKEN) {
+      headers['Authorization'] = `Bearer ${process.env.ANIMELIB_TOKEN.replace(/^Bearer\s+/i, '')}`;
+    }
+
+    if (process.env.ANIMELIB_COOKIE) {
+      headers['Cookie'] = process.env.ANIMELIB_COOKIE;
+    }
+
+    return headers;
+  }
+
   async getStreams(query: EpisodeQuery): Promise<StreamResult[]> {
     const { mediaId, episode, voiceover } = query;
     const kodikUrls = await this.findKodikPlayerUrls(mediaId, episode);
@@ -65,6 +86,7 @@ export class KodikPlugin extends BaseSourcePlugin {
     episode: number
   ): Promise<Array<{ url: string; voiceover?: string }>> {
     console.log(`[KodikPlugin] Запрос серий для mediaId: ${mediaId}...`);
+    const requestHeaders = this.getAnimelibApiHeaders();
 
     for (const base of this.apiBases) {
       try {
@@ -72,14 +94,14 @@ export class KodikPlugin extends BaseSourcePlugin {
         let res: any;
         try {
           res = await axios.get<any>(epUrl, {
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
+            headers: requestHeaders,
+            timeout: 8000,
           });
         } catch {
           res = await axios.get<any>(`${base}/episodes`, {
             params: { anime_id: mediaId },
-            headers: this.buildHeaders('https://animelib.org/'),
-            timeout: 5000,
+            headers: requestHeaders,
+            timeout: 8000,
           });
         }
 
@@ -97,21 +119,30 @@ export class KodikPlugin extends BaseSourcePlugin {
         let players: any[] = Array.isArray(targetEp.players) ? targetEp.players : [];
 
         if (players.length === 0) {
-          const epPlayersUrl = `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`;
-          try {
-            const playersRes = await axios.get<any>(epPlayersUrl, {
-              headers: this.buildHeaders('https://animelib.org/'),
-              timeout: 5000,
-            });
-            players = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
-          } catch {}
+          const epPlayersEndpoints = [
+            `${base}/anime/${mediaId}/episodes/${targetEp.id}/players`,
+            `${base}/episodes/${targetEp.id}/players`,
+          ];
+          for (const epPlayersUrl of epPlayersEndpoints) {
+            try {
+              const playersRes = await axios.get<any>(epPlayersUrl, {
+                headers: requestHeaders,
+                timeout: 8000,
+              });
+              const fetched = Array.isArray(playersRes.data) ? playersRes.data : (playersRes.data?.data || []);
+              if (fetched.length > 0) {
+                players = fetched;
+                break;
+              }
+            } catch {}
+          }
         }
 
         if (players.length === 0) {
           try {
             const epDetailRes = await axios.get<any>(`${base}/episodes/${targetEp.id}`, {
-              headers: this.buildHeaders('https://animelib.org/'),
-              timeout: 5000,
+              headers: requestHeaders,
+              timeout: 8000,
             });
             players = epDetailRes.data?.data?.players || epDetailRes.data?.players || [];
           } catch {}
@@ -198,6 +229,19 @@ export class KodikPlugin extends BaseSourcePlugin {
             source: this.id,
           };
         }
+      }
+
+      // 3. Если прямого URL нет в HTML, пытаемся разрешить через animelibService.resolveKodikStream (POST /ftor)
+      const resolved = await animelibService.resolveKodikStream(targetUrl);
+      if (resolved && resolved.url) {
+        return {
+          url: resolved.url,
+          quality: this.normalizeQuality(resolved.quality || '1080p'),
+          format: (resolved.format as any) || this.detectFormat(resolved.url),
+          headers: resolved.headers || this.buildHeaders(targetUrl, 'https://kodikplayer.com'),
+          voiceover: voiceover || 'Kodik',
+          source: this.id,
+        };
       }
 
       return null;
